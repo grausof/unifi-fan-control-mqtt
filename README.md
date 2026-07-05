@@ -238,7 +238,13 @@ systemctl restart fan-control.service  # Apply config changes
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=iceteaSA/unifi-fan-control&type=Date)](https://star-history.com/#iceteaSA/unifi-fan-control&Date)
+<a href="https://www.star-history.com/?type=date&repos=iceteaSA%2Funifi-fan-control">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=iceteaSA/unifi-fan-control&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=iceteaSA/unifi-fan-control&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=iceteaSA/unifi-fan-control&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## Credits & Acknowledgments
 - **Thermal Research**: [UCG-Max Thermal Thread](https://www.reddit.com/r/Ubiquiti/comments/1fr8xyt/)
