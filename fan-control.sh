@@ -444,7 +444,15 @@ if [[ -f "$TEMP_STATE_FILE" ]]; then
     # Validate saved temperature is a number and within reasonable range
     if [[ "$saved_temp" =~ ^[0-9]+$ ]] && (( saved_temp >= 20 && saved_temp <= 100 )); then
         # Don't use saved temp if it's too far from current raw temp (prevents large jumps)
-        if (( ${saved_temp#-} - ${raw_temp#-} < 15 )); then
+        # Compute the real absolute difference |saved - raw| — the previous
+        # `${saved_temp#-} - ${raw_temp#-}` form only stripped a leading minus
+        # from each operand independently and did NOT take |saved - raw|, so a
+        # hot restart with a stale low saved temp (raw > saved) always passed
+        # the < 15 guard and re-initialised SMOOTHED_TEMP to the stale value,
+        # potentially keeping the fan OFF on a hot boot until the next loop tick.
+        init_delta=$(( saved_temp - raw_temp ))
+        (( init_delta < 0 )) && init_delta=$(( -init_delta ))
+        if (( init_delta < 15 )); then
             SMOOTHED_TEMP=$saved_temp
             logger -t fan-control "INIT: Loaded saved temp=${SMOOTHED_TEMP}°C | Raw=${raw_temp}°C"
         else
