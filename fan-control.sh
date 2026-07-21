@@ -7,6 +7,15 @@
 CONFIG_FILE="${FAN_CONTROL_CONFIG_FILE:-/data/fan-control/config}"
 TEMP_STATE_FILE="${FAN_CONTROL_TEMP_STATE_FILE:-/data/fan-control/temp_state}"
 HWMON_BASE="${FAN_CONTROL_HWMON_BASE:-/sys/class/hwmon}"
+# Shared file written by mqtt-control.sh (mode/manual PWM), read every loop iteration.
+# Only consulted when MQTT_ENABLED=true; otherwise fan-control.sh behaves exactly like upstream.
+MQTT_MODE_FILE="${FAN_CONTROL_MQTT_MODE_FILE:-/data/fan-control/mqtt_mode}"
+
+# Pure-Bash MQTT client library (no mosquitto-clients dependency; see mqtt-lib.sh).
+# Only sourced/used when MQTT_ENABLED=true. Resolved relative to this script's own
+# location so it works regardless of the caller's current working directory.
+FAN_CONTROL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MQTT_LIB_FILE="${FAN_CONTROL_MQTT_LIB_FILE:-$FAN_CONTROL_SCRIPT_DIR/mqtt-lib.sh}"
 
 # Define default configuration values
 DEFAULT_MIN_PWM=91             # Minimum active fan speed (0-255)
@@ -23,6 +32,17 @@ DEFAULT_MAX_PWM_STEP=25        # Max PWM change per adjustment
 DEFAULT_DEADBAND=1             # Temp stability threshold (°C)
 DEFAULT_ALPHA=20               # Smoothing factor, lower values make the smoothed temp follow raw temp more closely (0-100)
 DEFAULT_LEARNING_RATE=5        # PWM optimization step size
+
+# MQTT integration is OPTIONAL and disabled by default. When MQTT_ENABLED=false
+# (default), none of the MQTT code paths run and the script behaves exactly like
+# upstream fan-control.sh.
+DEFAULT_MQTT_ENABLED=false           # Enable MQTT state publishing + manual mode support
+DEFAULT_MQTT_HOST="127.0.0.1"        # MQTT broker host
+DEFAULT_MQTT_PORT=1883               # MQTT broker port
+DEFAULT_MQTT_USER=""                 # MQTT broker username (optional)
+DEFAULT_MQTT_PASSWORD=""             # MQTT broker password (optional)
+DEFAULT_MQTT_BASE_TOPIC="unifi-fan-control"  # Base topic namespace (combined with hostname)
+DEFAULT_MQTT_DISCOVERY_PREFIX="homeassistant"  # Home Assistant MQTT discovery prefix
 
 # Create config file if it doesn't exist
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -54,6 +74,13 @@ MAX_PWM_STEP=$DEFAULT_MAX_PWM_STEP        # Max PWM change per adjustment
 DEADBAND=$DEFAULT_DEADBAND             # Temp stability threshold (°C)
 ALPHA=$DEFAULT_ALPHA               # Smoothing factor, lower values make the smoothed temp follow raw temp more closely (0-100)
 LEARNING_RATE=$DEFAULT_LEARNING_RATE        # PWM optimization step size
+MQTT_ENABLED=$DEFAULT_MQTT_ENABLED        # Enable MQTT state publishing + manual mode support (optional feature)
+MQTT_HOST="$DEFAULT_MQTT_HOST"        # MQTT broker host
+MQTT_PORT=$DEFAULT_MQTT_PORT        # MQTT broker port
+MQTT_USER="$DEFAULT_MQTT_USER"        # MQTT broker username (optional)
+MQTT_PASSWORD="$DEFAULT_MQTT_PASSWORD"        # MQTT broker password (optional)
+MQTT_BASE_TOPIC="$DEFAULT_MQTT_BASE_TOPIC"        # Base topic namespace (combined with hostname)
+MQTT_DISCOVERY_PREFIX="$DEFAULT_MQTT_DISCOVERY_PREFIX"        # Home Assistant MQTT discovery prefix
 DEFAULTS
         logger -t fan-control "FATAL: Failed to write to temporary config file"
         exit 1
@@ -105,6 +132,13 @@ check_param "MAX_PWM_STEP" "$DEFAULT_MAX_PWM_STEP" "# Max PWM change per adjustm
 check_param "DEADBAND" "$DEFAULT_DEADBAND" "# Temp stability threshold (°C)"
 check_param "ALPHA" "$DEFAULT_ALPHA" "# Smoothing factor (0-100)"
 check_param "LEARNING_RATE" "$DEFAULT_LEARNING_RATE" "# PWM optimization step size"
+check_param "MQTT_ENABLED" "$DEFAULT_MQTT_ENABLED" "# Enable MQTT state publishing + manual mode support (optional feature)"
+check_param "MQTT_HOST" "\"$DEFAULT_MQTT_HOST\"" "# MQTT broker host"
+check_param "MQTT_PORT" "$DEFAULT_MQTT_PORT" "# MQTT broker port"
+check_param "MQTT_USER" "\"$DEFAULT_MQTT_USER\"" "# MQTT broker username (optional)"
+check_param "MQTT_PASSWORD" "\"$DEFAULT_MQTT_PASSWORD\"" "# MQTT broker password (optional)"
+check_param "MQTT_BASE_TOPIC" "\"$DEFAULT_MQTT_BASE_TOPIC\"" "# Base topic namespace (combined with hostname)"
+check_param "MQTT_DISCOVERY_PREFIX" "\"$DEFAULT_MQTT_DISCOVERY_PREFIX\"" "# Home Assistant MQTT discovery prefix"
 
 # If missing parameters were found, update the config file atomically
 if [ ${#missing_params[@]} -gt 0 ]; then
@@ -231,6 +265,13 @@ validate_config "MAX_PWM_STEP" "$MAX_PWM_STEP" 1 50 "$DEFAULT_MAX_PWM_STEP" || c
 validate_config "DEADBAND" "$DEADBAND" 0 10 "$DEFAULT_DEADBAND" || config_changed=true
 validate_config "ALPHA" "$ALPHA" 1 99 "$DEFAULT_ALPHA" || config_changed=true
 validate_config "LEARNING_RATE" "$LEARNING_RATE" 1 20 "$DEFAULT_LEARNING_RATE" || config_changed=true
+
+# MQTT_ENABLED is a boolean flag, not a numeric range - validate separately
+if [[ "$MQTT_ENABLED" != "true" && "$MQTT_ENABLED" != "false" ]]; then
+    logger -t fan-control "CONFIG: Invalid MQTT_ENABLED value: $MQTT_ENABLED, using default: $DEFAULT_MQTT_ENABLED"
+    MQTT_ENABLED=$DEFAULT_MQTT_ENABLED
+fi
+validate_config "MQTT_PORT" "$MQTT_PORT" 1 65535 "$DEFAULT_MQTT_PORT" || true
 
 # If any config values were corrected, update the config file
 if [ "$config_changed" = true ]; then
@@ -657,6 +698,138 @@ set_fan_speed() {
     fi
 }
 
+###[ MQTT INTEGRATION (OPTIONAL) ]#############################################
+# Everything in this section is a no-op when MQTT_ENABLED=false (the default),
+# so fan-control.sh behaves exactly like upstream when MQTT is not configured.
+MQTT_DEVICE_ID="$(hostname 2>/dev/null | tr -c 'a-zA-Z0-9_-' '-')"
+[[ -z "$MQTT_DEVICE_ID" ]] && MQTT_DEVICE_ID="unifi-fan-control"
+MQTT_STATE_TOPIC="${MQTT_BASE_TOPIC}/${MQTT_DEVICE_ID}/state"
+MQTT_WARNED_MISSING_CLIENT=false
+
+# Current MQTT-driven mode, refreshed every loop iteration from MQTT_MODE_FILE.
+# Defaults to "auto" so behavior is identical to upstream unless mqtt-control.sh
+# has explicitly switched to "manual".
+MQTT_MODE="auto"
+MQTT_MANUAL_PWM_PERCENT=0
+MQTT_LIB_LOADED=false
+
+# Lazily source the pure-Bash MQTT client library the first time it's needed.
+_mqtt_ensure_lib_loaded() {
+    [[ "$MQTT_LIB_LOADED" == true ]] && return 0
+
+    if [[ ! -f "$MQTT_LIB_FILE" ]]; then
+        if [[ "$MQTT_WARNED_MISSING_CLIENT" == false ]]; then
+            logger -t fan-control "MQTT: mqtt-lib.sh not found at $MQTT_LIB_FILE - MQTT publishing disabled"
+            MQTT_WARNED_MISSING_CLIENT=true
+        fi
+        return 1
+    fi
+
+    # shellcheck source=mqtt-lib.sh
+    source "$MQTT_LIB_FILE"
+    MQTT_LIB_LOADED=true
+    return 0
+}
+
+# Publish a single message to the MQTT broker using the pure-Bash MQTT client
+# (mqtt-lib.sh). Opens a short-lived connection per publish - simple and
+# robust for this project's low-frequency (once per CHECK_INTERVAL) telemetry.
+# Silently returns if MQTT_ENABLED is not "true" or the library is unavailable.
+mqtt_publish() {
+    local topic="$1"
+    local payload="$2"
+    local retain_flag="$3"  # "retain" to set the MQTT retain flag, empty otherwise
+
+    [[ "$MQTT_ENABLED" == "true" ]] || return 0
+    _mqtt_ensure_lib_loaded || return 1
+
+    if ! mqtt_lib_connect "$MQTT_HOST" "$MQTT_PORT" "${MQTT_DEVICE_ID}-fc" "$MQTT_USER" "$MQTT_PASSWORD" 30; then
+        logger -t fan-control "MQTT: Connect failed ($MQTT_LIB_LAST_ERROR) - skipping publish to $topic"
+        return 1
+    fi
+
+    if ! mqtt_lib_publish "$topic" "$payload" "$retain_flag"; then
+        logger -t fan-control "MQTT: Failed to publish to $topic"
+        mqtt_lib_disconnect
+        return 1
+    fi
+
+    mqtt_lib_disconnect
+    return 0
+}
+
+# Publish the current controller state as a JSON payload. Called once per loop
+# iteration when MQTT_ENABLED=true.
+mqtt_publish_state() {
+    [[ "$MQTT_ENABLED" == "true" ]] || return 0
+
+    local state_name
+    if [[ "$MQTT_MODE" == "manual" ]]; then
+        # The auto state machine (OFF/TAPER/ACTIVE/EMERGENCY) is bypassed
+        # entirely in manual mode and CURRENT_STATE is left frozen at
+        # whatever it was before the switch, so report "MANUAL" here instead
+        # of a stale/misleading auto-state name.
+        state_name="MANUAL"
+    else
+        state_name=$(get_state_name "$CURRENT_STATE")
+    fi
+    local payload
+    payload=$(printf '{"state":"%s","mode":"%s","temp_smooth":%s,"pwm":%s,"pwm_percent":%s}' \
+        "$state_name" "$MQTT_MODE" "$SMOOTHED_TEMP" "$LAST_PWM" \
+        "$(( (LAST_PWM * 100 + 127) / 255 ))")
+
+    mqtt_publish "$MQTT_STATE_TOPIC" "$payload" "retain"
+}
+
+# Reload the manual/auto mode written by mqtt-control.sh. The file uses simple
+# KEY=VALUE lines (MODE=auto|manual, MANUAL_PWM_PERCENT=0-100) so it can be
+# written atomically and read cheaply every loop iteration.
+mqtt_load_mode() {
+    [[ "$MQTT_ENABLED" == "true" ]] || return 0
+    [[ -f "$MQTT_MODE_FILE" ]] || return 0
+
+    local file_mode="" file_pwm=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            MODE) file_mode="$value" ;;
+            MANUAL_PWM_PERCENT) file_pwm="$value" ;;
+        esac
+    done < "$MQTT_MODE_FILE" 2>/dev/null
+
+    if [[ "$file_mode" == "auto" || "$file_mode" == "manual" ]]; then
+        MQTT_MODE="$file_mode"
+    fi
+    if [[ "$file_pwm" =~ ^[0-9]+$ ]] && (( file_pwm >= 0 && file_pwm <= 100 )); then
+        MQTT_MANUAL_PWM_PERCENT=$file_pwm
+    fi
+}
+
+# Apply the manual PWM percentage directly to every detected fan channel,
+# bypassing the state machine, ramp limits, MIN/MAX enforcement and the
+# EMERGENCY fail-safe entirely. This is an explicit user choice: in manual
+# mode the fan stays exactly at the requested speed, with no automatic
+# override, even at critical temperatures.
+apply_manual_pwm() {
+    local percent=$MQTT_MANUAL_PWM_PERCENT
+    local pwm=$(( (percent * 255 + 50) / 100 ))
+    (( pwm > 255 )) && pwm=255
+    (( pwm < 0 )) && pwm=0
+
+    if [[ "$pwm" -ne "$LAST_PWM" ]]; then
+        local write_ok=true
+        for pwm_dev in "${FAN_PWM_DEVICES[@]}"; do
+            if ! echo "$pwm" > "$pwm_dev" 2>/dev/null; then
+                logger -t fan-control "ERROR: Failed to write to PWM device $pwm_dev (manual mode)"
+                write_ok=false
+            fi
+        done
+        if [[ "$write_ok" = true ]]; then
+            logger -t fan-control "MANUAL: ${LAST_PWM}→${pwm}pwm (${percent}%) | No EMERGENCY failsafe in manual mode"
+            LAST_PWM=$pwm
+        fi
+    fi
+}
+
 ###[ STATE MANAGEMENT ]########################################################
 update_fan_state() {
     get_smoothed_temp
@@ -801,14 +974,42 @@ get_state_name() {
 
 # Main loop
 declare -i loop_counter=0
+PREVIOUS_MQTT_MODE="$MQTT_MODE"
 while true; do
-    update_fan_state
+    mqtt_load_mode
+
+    # When switching back from manual to auto, the state machine may believe
+    # it is already in STATE_OFF (unchanged since manual mode bypassed it) and
+    # would otherwise skip re-writing the PWM device, leaving the stale manual
+    # value in place. Force a resync exactly like the cold-start path does.
+    if [[ "$PREVIOUS_MQTT_MODE" == "manual" && "$MQTT_MODE" == "auto" ]]; then
+        logger -t fan-control "MQTT: Mode switched manual→auto, resyncing fan state"
+        CURRENT_STATE=$STATE_OFF
+        set_fan_speed 0
+    fi
+    PREVIOUS_MQTT_MODE="$MQTT_MODE"
+
+    if [[ "$MQTT_MODE" == "manual" ]]; then
+        # Manual mode (set via Home Assistant): still track temperature for
+        # telemetry, but bypass the state machine entirely - no EMERGENCY
+        # failsafe override while manual mode is active (explicit user choice).
+        get_smoothed_temp
+        apply_manual_pwm
+    else
+        update_fan_state
+    fi
+
+    mqtt_publish_state
 
     # Log status every 10 iterations
     (( loop_counter++ % 10 == 0 )) && {
-        state_name=$(get_state_name $CURRENT_STATE)
+        if [[ "$MQTT_MODE" == "manual" ]]; then
+            state_name="MANUAL"
+        else
+            state_name=$(get_state_name $CURRENT_STATE)
+        fi
         current_temp=$SMOOTHED_TEMP
-        logger -t fan-control "STATUS: State=${state_name} | PWM=${LAST_PWM} | Temp=${current_temp}°C"
+        logger -t fan-control "STATUS: State=${state_name} | Mode=${MQTT_MODE} | PWM=${LAST_PWM} | Temp=${current_temp}°C"
     }
 
     sleep $CHECK_INTERVAL

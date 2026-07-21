@@ -36,6 +36,11 @@ setup_sandbox() {
     export FAN_CONTROL_PID_FILE="$SANDBOX/pid"
     export FAN_CONTROL_OPTIMAL_PWM_FILE="$SANDBOX/optimal_pwm"
     export FAN_CONTROL_HWMON_BASE="$SANDBOX/hwmon"
+    # MQTT is optional and off by default; these paths are only read/written
+    # when MQTT_ENABLED=true in the config file, but are always sandboxed so
+    # MQTT tests never touch the real filesystem.
+    export FAN_CONTROL_MQTT_MODE_FILE="$SANDBOX/mqtt_mode"
+    export FAN_CONTROL_MQTT_PID_FILE="$SANDBOX/mqtt-control.pid"
 
     # Build fake hwmon tree — one device with one PWM channel
     local hwmon_dir="$SANDBOX/hwmon/hwmon0"
@@ -96,6 +101,21 @@ cleanup_sandbox() {
         wait "$DAEMON_PID" 2>/dev/null || true
     fi
     DAEMON_PID=""
+    if [[ -n "${MQTT_DAEMON_PID:-}" ]]; then
+        kill "$MQTT_DAEMON_PID" 2>/dev/null || true
+        wait "$MQTT_DAEMON_PID" 2>/dev/null || true
+    fi
+    MQTT_DAEMON_PID=""
+    if [[ -n "${MQTT_CAPTURE_PID:-}" ]]; then
+        kill "$MQTT_CAPTURE_PID" 2>/dev/null || true
+        wait "$MQTT_CAPTURE_PID" 2>/dev/null || true
+    fi
+    MQTT_CAPTURE_PID=""
+    if [[ -n "${MQTT_BROKER_PID:-}" ]]; then
+        kill "$MQTT_BROKER_PID" 2>/dev/null || true
+        wait "$MQTT_BROKER_PID" 2>/dev/null || true
+    fi
+    MQTT_BROKER_PID=""
     if [[ -n "${SANDBOX:-}" && -d "$SANDBOX" ]]; then
         rm -rf "$SANDBOX"
     fi
@@ -235,4 +255,126 @@ daemon_alive() {
 pid_file_valid() {
     local pid_file="${FAN_CONTROL_PID_FILE:-$SANDBOX/pid}"
     [[ -f "$pid_file" ]] && [[ "$(cat "$pid_file" 2>/dev/null)" == "${DAEMON_PID:-}" ]]
+}
+
+# ── MQTT test helpers (optional feature) ────────────────────────────────────
+# These tests exercise the real pure-Bash MQTT client (mqtt-lib.sh) against a
+# real local mosquitto *broker* instance. The broker binary is only a test
+# dependency (installed via `brew install mosquitto` for local development);
+# the shipped project itself never invokes mosquitto_pub/mosquitto_sub or any
+# other external MQTT client - see mqtt-lib.sh.
+MQTT_BROKER_PID=""
+MQTT_TEST_PORT=""
+
+# Start a throwaway local mosquitto broker (anonymous access, random high
+# port) for the duration of one test scenario.
+start_test_broker() {
+    MQTT_TEST_PORT=$(( 20000 + RANDOM % 10000 ))
+    cat > "$SANDBOX/mosquitto.conf" <<-CONF
+	listener ${MQTT_TEST_PORT} 127.0.0.1
+	allow_anonymous true
+	CONF
+    mosquitto -c "$SANDBOX/mosquitto.conf" > "$SANDBOX/mosquitto.log" 2>&1 &
+    MQTT_BROKER_PID=$!
+
+    local waited=0
+    while ! grep -q "mosquitto version .* running" "$SANDBOX/mosquitto.log" 2>/dev/null; do
+        (( waited >= 50 )) && fail "Test mosquitto broker did not start within 5s"
+        /bin/sleep 0.1
+        waited=$((waited + 1))
+    done
+}
+
+stop_test_broker() {
+    if [[ -n "${MQTT_BROKER_PID:-}" ]]; then
+        kill "$MQTT_BROKER_PID" 2>/dev/null || true
+        wait "$MQTT_BROKER_PID" 2>/dev/null || true
+    fi
+    MQTT_BROKER_PID=""
+}
+
+# Subscribe in the background using our own mqtt-lib.sh (never mosquitto_sub)
+# and append every received message as "topic|payload|retain" lines to
+# $SANDBOX/mqtt_capture.log, for test assertions.
+MQTT_CAPTURE_PID=""
+
+start_mqtt_capture() {
+    local topic_filter="$1"
+    : > "$SANDBOX/mqtt_capture.log"
+    (
+        source "$REPO_ROOT/mqtt-lib.sh"
+        if mqtt_lib_connect "127.0.0.1" "$MQTT_TEST_PORT" "test-capture-$$" "" "" 30; then
+            mqtt_lib_subscribe_multi "$topic_filter"
+            while true; do
+                mqtt_lib_read_packet 5
+                case "$MQTT_LIB_LAST_PACKET_TYPE" in
+                    PUBLISH)
+                        echo "${MQTT_LIB_RX_TOPIC}|${MQTT_LIB_RX_PAYLOAD}|${MQTT_LIB_RX_RETAIN}" >> "$SANDBOX/mqtt_capture.log"
+                        ;;
+                    DISCONNECTED)
+                        break
+                        ;;
+                esac
+            done
+        fi
+    ) &
+    MQTT_CAPTURE_PID=$!
+    /bin/sleep 0.3
+}
+
+stop_mqtt_capture() {
+    if [[ -n "${MQTT_CAPTURE_PID:-}" ]]; then
+        kill "$MQTT_CAPTURE_PID" 2>/dev/null || true
+        wait "$MQTT_CAPTURE_PID" 2>/dev/null || true
+    fi
+    MQTT_CAPTURE_PID=""
+}
+
+# Publish a single message using our own mqtt-lib.sh (never mosquitto_pub),
+# for tests that need to simulate an incoming command from Home Assistant.
+mqtt_test_publish() {
+    local topic="$1" payload="$2" retain="${3:-}"
+    (
+        source "$REPO_ROOT/mqtt-lib.sh"
+        if mqtt_lib_connect "127.0.0.1" "$MQTT_TEST_PORT" "test-pub-$$" "" "" 30; then
+            mqtt_lib_publish "$topic" "$payload" "$retain"
+            mqtt_lib_disconnect
+        fi
+    )
+}
+
+# Poll $SANDBOX/mqtt_capture.log until a line matching the given grep pattern
+# appears, or timeout expires.
+wait_for_mqtt_capture() {
+    local pattern="$1"
+    local timeout_s="${2:-10}"
+    local elapsed=0
+    while (( elapsed < timeout_s * 10 )); do
+        if grep -q "$pattern" "$SANDBOX/mqtt_capture.log" 2>/dev/null; then
+            return 0
+        fi
+        /bin/sleep 0.1
+        elapsed=$((elapsed + 1))
+    done
+    echo "TIMEOUT: wait_for_mqtt_capture '${pattern}' after ${timeout_s}s" >&2
+    echo "--- mqtt_capture.log contents ---" >&2
+    cat "$SANDBOX/mqtt_capture.log" 2>/dev/null >&2
+    return 1
+}
+
+# ── mqtt-control.sh daemon lifecycle ────────────────────────────────────────
+MQTT_CONTROL_SCRIPT="${MQTT_CONTROL_SCRIPT:-$REPO_ROOT/mqtt-control.sh}"
+
+start_mqtt_daemon() {
+    bash "$MQTT_CONTROL_SCRIPT" &
+    MQTT_DAEMON_PID=$!
+    /bin/sleep 0.5
+}
+
+stop_mqtt_daemon() {
+    if [[ -n "${MQTT_DAEMON_PID:-}" ]] && kill -0 "$MQTT_DAEMON_PID" 2>/dev/null; then
+        kill -TERM "$MQTT_DAEMON_PID" 2>/dev/null || true
+        wait "$MQTT_DAEMON_PID" 2>/dev/null || true
+    fi
+    MQTT_DAEMON_PID=""
 }

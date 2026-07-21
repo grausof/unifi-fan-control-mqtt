@@ -1,0 +1,22 @@
+[Unit]
+Description=UniFi Fan Control - MQTT Command Listener (optional)
+Documentation=https://github.com/grausof/unifi-fan-control-mqtt
+After=basic.target network-online.target fan-control.service
+Wants=network-online.target
+# fan-control.service writes the config file this service reads; not fatal if
+# it isn't running, but ordering avoids a race on first boot.
+Requisite=fan-control.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/data/fan-control
+ExecStart=/data/fan-control/mqtt-control.sh
+Restart=always
+RestartSec=5
+# 24h window for log rate limiting
+LogRateLimitIntervalSec=86400
+LogRateLimitBurst=10000
+
+[Install]
+WantedBy=multi-user.target

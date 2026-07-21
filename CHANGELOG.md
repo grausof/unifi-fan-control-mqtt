@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optional MQTT / Home Assistant integration**, disabled by default (`MQTT_ENABLED=false`):
+  - `fan-control.sh` now publishes a retained JSON state message (state, temperature, PWM, mode) to MQTT every cycle when enabled, and supports a manual PWM bypass mode with no EMERGENCY failsafe override (explicit user choice), persisted across reboots.
+  - New `mqtt-lib.sh`: a **pure-Bash MQTT 3.1.1 client** (CONNECT/PUBLISH/SUBSCRIBE/PINGREQ over bash's `/dev/tcp`, QoS 0, no TLS). No external MQTT client (`mosquitto-clients`) is required or used, since UniFi OS devices have no package manager to install one with.
+  - New `mqtt-control.sh` companion script/service: publishes Home Assistant MQTT Discovery messages (sensors, an Auto Mode switch, a Manual PWM 0-100% number slider) and listens for commands, using `mqtt-lib.sh`.
+  - New `mqtt-control.service` systemd unit, installed only when MQTT is enabled.
+  - `install.sh` now prompts (or accepts `FAN_CONTROL_ENABLE_MQTT`/`FAN_CONTROL_MQTT_*` env vars) to optionally configure and deploy the MQTT integration; `uninstall.sh` removes it if present.
+  - New env-var seams for testability: `FAN_CONTROL_MQTT_MODE_FILE`, `FAN_CONTROL_MQTT_PID_FILE`.
+  - New test files: `test_mqtt_disabled_default.sh`, `test_mqtt_publish.sh`, `test_mqtt_manual_bypass.sh`, `test_mqtt_discovery.sh`, exercising the pure-Bash client against a real local test broker.
 - Test suite (`tests/`) — sandboxed, no-root, dependency-free bash tests covering config bootstrap, PWM detection, state machine, and regression tests for #17 and #18.
 - Env-var seams for testability: `FAN_CONTROL_CONFIG_FILE`, `FAN_CONTROL_TEMP_STATE_FILE`, `FAN_CONTROL_PID_FILE`, `FAN_CONTROL_OPTIMAL_PWM_FILE`, `FAN_CONTROL_HWMON_BASE`.
 - CONTRIBUTING.md with contribution guidelines

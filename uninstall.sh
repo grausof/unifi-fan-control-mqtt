@@ -17,6 +17,15 @@ fi
 systemctl stop fan-control.service 2>/dev/null || true
 systemctl disable fan-control.service 2>/dev/null || true
 
+# Stop and disable the optional MQTT command listener service, if it was installed
+if systemctl list-unit-files 2>/dev/null | grep -q '^mqtt-control\.service'; then
+    echo "Removing optional MQTT integration..."
+    systemctl stop mqtt-control.service 2>/dev/null || true
+    systemctl disable mqtt-control.service 2>/dev/null || true
+    rm -f /etc/systemd/system/mqtt-control.service || echo "Warning: Could not remove mqtt-control.service file"
+    rm -f /var/run/mqtt-control.pid || echo "Warning: Could not remove MQTT PID file"
+fi
+
 # Reset all fan PWM channels to 0
 # Mirrors the detection logic in fan-control.sh to find all active channels
 reset_ok=false

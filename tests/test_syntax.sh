@@ -10,6 +10,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 echo "  Checking fan-control.sh ..."
 bash -n "$REPO_ROOT/fan-control.sh"
 
+echo "  Checking mqtt-control.sh ..."
+bash -n "$REPO_ROOT/mqtt-control.sh"
+
 echo "  Checking install.sh ..."
 bash -n "$REPO_ROOT/install.sh"
 

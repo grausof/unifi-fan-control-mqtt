@@ -1,7 +1,7 @@
 [Unit]
 Description=UniFi Adaptive Fan Controller
 After=basic.target
-Documentation=https://github.com/iceteaSA/unifi-fan-control
+Documentation=https://github.com/grausof/unifi-fan-control-mqtt
 
 [Service]
 Type=simple
