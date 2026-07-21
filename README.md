@@ -3,6 +3,8 @@
 Advanced temperature management for Ubiquiti UniFi OS devices with fan control, with an
 **optional** MQTT / Home Assistant integration layered on top.
 
+<img width="677" height="546" alt="Home Assistant screenshot" src="https://github.com/user-attachments/assets/10364ace-46d2-401b-a267-57d0e4289cb3" />
+
 > This is a community fork of [iceteaSA/unifi-fan-control](https://github.com/iceteaSA/unifi-fan-control),
 > adding optional MQTT publishing and Home Assistant control (auto/manual mode, manual PWM
 > slider) while keeping the original temperature control logic unchanged.
