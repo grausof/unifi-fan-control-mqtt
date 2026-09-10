@@ -84,7 +84,7 @@ The daemon logs `CONFIG: fan-control vX.Y.Z starting`, and `VERSION` is installe
 
 ### Added
 - **Optional MQTT / Home Assistant integration**, disabled by default (`MQTT_ENABLED=false`):
-  - `fan-control.sh` now publishes a retained JSON state message (state, temperature, PWM, mode) to MQTT every cycle when enabled, and supports a manual PWM bypass mode with no EMERGENCY failsafe override (explicit user choice), persisted across reboots.
+  - `fan-control.sh` now publishes a retained JSON state message (state, temperature, PWM, mode) to MQTT every cycle when enabled, and supports a manual PWM bypass mode with a MAX_TEMP safety backstop (see Fixed, below), persisted across reboots.
   - New `mqtt-lib.sh`: a **pure-Bash MQTT 3.1.1 client** (CONNECT/PUBLISH/SUBSCRIBE/PINGREQ over bash's `/dev/tcp`, QoS 0, no TLS). No external MQTT client (`mosquitto-clients`) is required or used, since UniFi OS devices have no package manager to install one with.
   - New `mqtt-control.sh` companion script/service: publishes Home Assistant MQTT Discovery messages (sensors, an Auto Mode switch, a Manual PWM 0-100% number slider) and listens for commands, using `mqtt-lib.sh`.
   - New `mqtt-control.service` systemd unit, installed only when MQTT is enabled.
@@ -108,6 +108,21 @@ The daemon logs `CONFIG: fan-control vX.Y.Z starting`, and `VERSION` is installe
 - GitHub pull request template
 
 ### Fixed
+- MQTT publish no longer risks stalling the temperature control loop. `/dev/tcp` has
+  no connect timeout, so a broker host that drops SYN packets (rather than actively
+  refusing the connection) could previously block the publish for minutes. Added a
+  pure-Bash timeout watchdog bounding every publish to 3 seconds.
+- The two config-rewrite heredocs used by `migrate_config`/`validate_config` were
+  missing the 7 MQTT parameters present in the initial-create heredoc, so the first
+  migration or value-clamp after enabling MQTT would silently reset a user's broker
+  settings to their defaults. All three rewrite paths now stay in sync, and
+  `test_config_parity.sh` derives its expected parameter count dynamically instead
+  of a hardcoded value so this class of bug can't reappear unnoticed.
+- Manual mode now has a `MAX_TEMP` safety backstop: below `MAX_TEMP` the fan stays
+  exactly at the requested manual PWM with no automatic adjustment, but reaching
+  `MAX_TEMP` forces full speed and switches back to Auto Mode (persisted so Home
+  Assistant's Auto Mode switch reflects it), protecting against a low manual value
+  being left in place unnoticed.
 - [#17](https://github.com/iceteaSA/unifi-fan-control/issues/17): Lock and cleanup trap were registered in a subshell that exited immediately. Moved `flock` and `trap` to the parent shell so the lock is held for the daemon's lifetime, cleanup runs on actual exit, and single-instance guard is authoritative.
 - [#18](https://github.com/iceteaSA/unifi-fan-control/issues/18): `get_smoothed_temp` was called via `$(...)`, losing `TEMP_READ_FAILURES` and `SMOOTHED_TEMP` mutations in subshells. Rewrote to communicate via globals; added a sensor fail-safe in `update_fan_state` that forces `MAX_PWM` after 3 consecutive read failures, bypassing state-machine and ramp limits.
 - Fan speed no longer increases as the device cools below the activation temperature; the quadratic curve now clamps sub-activation `temp_diff` to zero (#26).

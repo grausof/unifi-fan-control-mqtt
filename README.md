@@ -179,7 +179,7 @@ systemctl restart fan-control.service
 | **TAPER**   | Temp ≤ 60°C from ACTIVE    | Temp ≥ 67°C or timer elapsed     | Minimum speed for configured mins |
 | **ACTIVE**  | 65°C - 85°C                | Temp ≤ 60°C or Temp ≥ 85°C       | Quadratic speed response          |
 | **EMERGENCY**| ≥85°C                     | Temp ≤ 80°C (with hysteresis)    | Immediate full speed (255 PWM)    |
-| **MANUAL** (MQTT only) | Auto Mode switched OFF in Home Assistant | Auto Mode switched back ON | Fan speed fully controlled by the Manual PWM slider; the temperature-based state machine above is bypassed entirely (see [Manual Mode Behavior](#manual-mode-behavior)) |
+| **MANUAL** (MQTT only) | Auto Mode switched OFF in Home Assistant | Auto Mode switched back ON, or temperature reaches MAX_TEMP (safety backstop) | Fan speed fully controlled by the Manual PWM slider below MAX_TEMP; the temperature-based state machine above is bypassed except for the MAX_TEMP backstop (see [Manual Mode Behavior](#manual-mode-behavior)) |
 
 ### State Transitions
 - **OFF → ACTIVE**: Temperature rises above activation threshold (65°C)
@@ -365,11 +365,15 @@ configuration required:
 Turning off **Auto Mode** hands full control of the fan to the **Manual PWM** slider:
 - The value you set is applied directly to every detected fan channel and **persists
   across reboots** (stored in `/data/fan-control/mqtt_mode`).
-- **There is no automatic EMERGENCY failsafe override in manual mode.** The fan stays
-  exactly at the percentage you set, even if the temperature reaches critical levels.
-  This is an intentional design choice to give you full manual control; re-enable Auto
-  Mode (or adjust the slider yourself) if you need automatic thermal protection again.
-- Switching back to Auto Mode immediately resumes the normal state machine.
+- **A MAX_TEMP safety backstop still applies in manual mode.** Below `MAX_TEMP` the fan
+  stays exactly at the percentage you set, with no automatic adjustment - but if the
+  smoothed temperature reaches `MAX_TEMP` (default 85°C), fan-control.sh forces the fan
+  to full speed, switches Auto Mode back on, and persists that change so Home Assistant's
+  Auto Mode switch reflects it. This protects against a low value being left in place
+  (e.g. by a forgotten Home Assistant automation) while still leaving you in full manual
+  control for any temperature below that threshold.
+- Switching back to Auto Mode (whether by you or by the MAX_TEMP backstop) immediately
+  resumes the normal state machine.
 
 ### MQTT Topics
 ```
