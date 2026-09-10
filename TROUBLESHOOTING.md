@@ -11,6 +11,7 @@ This guide covers common issues and their solutions for the UniFi Fan Control sy
 - [Installation Issues](#installation-issues)
 - [Performance Issues](#performance-issues)
 - [Diagnostic Commands](#diagnostic-commands)
+- [Hardware Compatibility Notes](#hardware-compatibility-notes)
 
 ---
 
@@ -246,6 +247,10 @@ ubnt-systool cputemp
 journalctl -u fan-control.service -n 20 | grep "TEMP:"
 ```
 
+`TEMP:` is logged when the raw or smoothed value changes. A quiet `TEMP:`
+stream is normal at a stable temperature; `STATUS:` remains the heartbeat and
+is written every 10 control cycles.
+
 **Common causes**:
 
 1. **Smoothing effect**: System uses exponential smoothing
@@ -284,6 +289,29 @@ journalctl -xe
 
 ---
 
+### Drive Temperature Floor Is Active
+
+**Symptoms**: The fan runs while CPU temperature is below its activation threshold, or `DRIVE:` appears in the log.
+
+The drive floor is separate from the CPU curve. It starts at 50°C and reaches maximum PWM at 70°C by default. A device without a readable drive stays silent and keeps the existing CPU-only behavior.
+
+**Check**:
+```bash
+journalctl -u fan-control.service -n 50 | grep "DRIVE:"
+```
+
+**Tune or disable it**:
+```bash
+sudo nano /data/fan-control/config
+
+DRIVE_MIN_TEMP=55        # Start the floor later
+DRIVE_MAX_TEMP=75        # Reach maximum PWM later
+# DRIVE_TEMP_ENABLED=false  # Skip drive detection entirely
+
+sudo systemctl restart fan-control.service
+```
+
+---
 ## Configuration Issues
 
 ### Configuration Changes Not Applied
@@ -365,25 +393,58 @@ cat /data/fan-control/config
    ls -la /data
 
    # May need to create /data if it doesn't exist (unusual)
-   sudo mkdir -p /data
-   ```
+    sudo mkdir -p /data
+    ```
+
+### Release Download or Checksum Failure
+
+The default installer uses the latest tagged release. To retry a known release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_VERSION=v1.2.0 bash
+```
+
+The installer verifies the downloaded tarball against the matching
+`SHA256SUMS`. A checksum or archive validation failure leaves the installed
+files unchanged. Check the installed identity with:
+
+```bash
+cat /data/fan-control/VERSION
+```
+
+### DNS Failure Resolving `release-assets.githubusercontent.com`
+
+GitHub redirects release downloads from `github.com` to
+`release-assets.githubusercontent.com`. A verified install needs both names to
+resolve. If the installer names `release-assets.githubusercontent.com`, fix the
+device's resolver, DNS filter, or stale cache. The installer and release are not
+the cause.
+
+The installer also checks `raw.githubusercontent.com` and reports whether it is
+reachable. If it is reachable and the resolver cannot be fixed immediately, use
+the exact tag from the error message to opt in to the fallback:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/v1.2.0/install.sh | sudo FAN_CONTROL_ALLOW_UNVERIFIED=v1.2.0 bash
+```
+
+This is a deliberate one-install exception. It downloads tagged files from
+`raw.githubusercontent.com` and skips SHA256 verification; it does not weaken the
+file-size, syntax, or payload validation checks. Fixing DNS and using the verified
+release path remains the right fix.
 
 ### Branch-Specific Installation Fails
 
-**Issue**: Can't install from specific branch
+**Issue**: Can't install from a specific branch
 
-**Solutions**:
+Branch installs are for development only and are not checksum-verified.
+
 ```bash
-# Method 1: Direct URL
-curl -sSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/BRANCH_NAME/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_BRANCH=feature/example bash
 
-# Method 2: Environment variable
-FAN_CONTROL_BRANCH=dev curl -sSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo bash
-
-# Method 3: Manual clone
+# Or install local runtime files from a checkout
 git clone https://github.com/iceteaSA/unifi-fan-control.git
 cd unifi-fan-control
-git checkout BRANCH_NAME
 sudo ./install.sh
 ```
 
@@ -451,6 +512,9 @@ cat /sys/class/hwmon/hwmon0/pwm1
 # Current configuration
 cat /data/fan-control/config
 
+# Installed release identity
+cat /data/fan-control/VERSION
+
 # Optimal PWM value
 cat /data/fan-control/optimal_pwm
 
@@ -479,6 +543,9 @@ journalctl -u fan-control.service | grep "STATUS:"
 ```bash
 # Temperature trends (last hour)
 journalctl -u fan-control.service --since "1 hour ago" | grep "TEMP:"
+
+# Daemon heartbeat and current temperature
+journalctl -u fan-control.service --since "1 hour ago" | grep "STATUS:"
 
 # PWM adjustments (last hour)
 journalctl -u fan-control.service --since "1 hour ago" | grep "SET:"
@@ -518,6 +585,59 @@ If you're still experiencing issues:
 ---
 
 ## Hardware Compatibility Notes
+
+### Service disappeared after a UniFi OS update
+
+Check whether it is actually gone, or just stopped:
+
+```bash
+systemctl status fan-control.service
+ls -l /data/fan-control/ /etc/systemd/system/fan-control.service
+```
+
+If both the unit and `/data/fan-control` are missing, the overlay was rebuilt — that is a
+factory reset, `reset2defaults`, re-adoption, or a recovery flow, not a routine firmware
+update. UniFi OS keeps the firmware as a read-only lower layer and everything you install
+in an upper layer, and both halves of this install live in that upper layer. A normal
+update replaces the lower layer only.
+
+A useful tell: if other things you installed vanished at the same time, it was the
+overlay, not this project. Reinstall with the one-liner in the README; your config comes
+back only if `/data/fan-control/config` survived.
+
+### Unsupported hardware: UniFi switches (USW line)
+
+`-sh: bash: not found` on a USW means exactly what it says. Switches run BusyBox `sh`,
+not bash, and nothing is installed when this happens — it fails on the first command.
+
+Four separate things block it, not one: no bash (the daemon uses `[[ ]]`, `(( ))` and
+arrays throughout), no `ubnt-systool` for CPU temperature, no systemd, and fans that are
+firmware controlled rather than exposed to userspace.
+
+The last one is the decisive one, and it is measured rather than assumed. On a USW
+Enterprise 48 PoE running 7.5.9:
+
+```
+# ls /sys/class/hwmon/*/pwm* 2>/dev/null || echo "no pwm files"
+no pwm files
+```
+
+No PWM files means the fans are not reachable from userspace at all, so no script can
+control them — a POSIX `sh` rewrite with a different temperature source would still have
+nothing to write to.
+
+To check your own device:
+
+```sh
+ls /sys/class/hwmon/*/pwm* 2>/dev/null || echo "no pwm files"
+command -v ubnt-systool || echo "no ubnt-systool"
+```
+
+If the first command ever starts printing paths after a firmware update, that changes the
+answer — worth re-checking after a major version jump.
+
+No output from the first means the fans are not software-controllable there, and no
+script of any kind will help.
 
 ### Different PWM Device Paths
 

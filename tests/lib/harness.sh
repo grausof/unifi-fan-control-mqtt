@@ -19,7 +19,6 @@ set -euo pipefail
 # ── Paths ────────────────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAN_CONTROL_SCRIPT="${FAN_CONTROL_SCRIPT:-$REPO_ROOT/fan-control.sh}"
-TEST_DIR="$REPO_ROOT/tests"
 
 # ── Sandbox ──────────────────────────────────────────────────────────────────
 # All state lives here.  Created by setup_sandbox, destroyed by teardown_sandbox.
@@ -41,21 +40,27 @@ setup_sandbox() {
     # MQTT tests never touch the real filesystem.
     export FAN_CONTROL_MQTT_MODE_FILE="$SANDBOX/mqtt_mode"
     export FAN_CONTROL_MQTT_PID_FILE="$SANDBOX/mqtt-control.pid"
+    export FAN_CONTROL_VERSION_FILE="$SANDBOX/VERSION"
+    export FAN_CONTROL_DRIVE_DEV_DIR="$SANDBOX/drives"
+
+    mkdir -p "$FAN_CONTROL_DRIVE_DEV_DIR"
 
     # Build fake hwmon tree — one device with one PWM channel
     local hwmon_dir="$SANDBOX/hwmon/hwmon0"
     mkdir -p "$hwmon_dir"
-    echo 0 > "$hwmon_dir/pwm1"
-    echo 3000 > "$hwmon_dir/fan1_input"   # RPM — fan spinning by default
-    echo "fake-driver" > "$hwmon_dir/name"
+    echo 0 >"$hwmon_dir/pwm1"
+    echo 3000 >"$hwmon_dir/fan1_input" # RPM — fan spinning by default
+    echo "fake-driver" >"$hwmon_dir/name"
 
     # Create stub bin directory PREPENDED to PATH
     mkdir -p "$SANDBOX/bin"
+    local real_sleep_path
+    real_sleep_path=$(command -v sleep)
     export PATH="$SANDBOX/bin:$PATH"
 
     # Stub: ubnt-systool — reads $SANDBOX/cputemp; exits 1 on missing or FAIL
-    cat > "$SANDBOX/bin/ubnt-systool" <<'STUB'
-#!/bin/bash
+    cat >"$SANDBOX/bin/ubnt-systool" <<'STUB'
+#!/usr/bin/env bash
 if [[ "$1" != "cputemp" ]]; then
     echo "unknown arg: $*" >&2
     exit 1
@@ -73,24 +78,63 @@ STUB
     chmod +x "$SANDBOX/bin/ubnt-systool"
 
     # Stub: logger — appends arguments to $SANDBOX/syslog
-    cat > "$SANDBOX/bin/logger" <<'STUB'
-#!/bin/bash
+    cat >"$SANDBOX/bin/logger" <<'STUB'
+#!/usr/bin/env bash
 echo "$@" >> "${SANDBOX:-/tmp}/syslog"
 STUB
     chmod +x "$SANDBOX/bin/logger"
 
+    # Stubs: drive tools select per-device fixtures and failures when requested.
+    cat >"$SANDBOX/bin/nvme" <<'STUB'
+#!/usr/bin/env bash
+echo "nvme $*" >> "${SANDBOX:-/tmp}/drive_calls"
+device="${!#}"
+device_name="${device##*/}"
+if [[ -f "${SANDBOX:-/tmp}/nvme_fail" || -f "${SANDBOX:-/tmp}/nvme_fail_${device_name}" ]]; then
+    exit 1
+fi
+response_file="${SANDBOX:-/tmp}/nvme_response_${device_name}"
+if [[ ! -f "$response_file" ]]; then
+    response_file="${SANDBOX:-/tmp}/nvme_response"
+fi
+[[ -f "$response_file" ]] || exit 1
+cat "$response_file"
+STUB
+    chmod +x "$SANDBOX/bin/nvme"
+
+    cat >"$SANDBOX/bin/smartctl" <<'STUB'
+#!/usr/bin/env bash
+echo "smartctl $*" >> "${SANDBOX:-/tmp}/drive_calls"
+device="${!#}"
+device_name="${device##*/}"
+if [[ -f "${SANDBOX:-/tmp}/smartctl_standby_${device_name}" ]]; then
+    echo "Device is in STANDBY mode, exit(2)" >&2
+    exit 2
+fi
+if [[ -f "${SANDBOX:-/tmp}/smartctl_fail" || -f "${SANDBOX:-/tmp}/smartctl_fail_${device_name}" ]]; then
+    exit 1
+fi
+response_file="${SANDBOX:-/tmp}/smartctl_response_${device_name}"
+if [[ ! -f "$response_file" ]]; then
+    response_file="${SANDBOX:-/tmp}/smartctl_response"
+fi
+[[ -f "$response_file" ]] || exit 1
+cat "$response_file"
+STUB
+    chmod +x "$SANDBOX/bin/smartctl"
+
     # Stub: sleep — accelerates daemon loop by sleeping 0.05s
-    cat > "$SANDBOX/bin/sleep" <<'STUB'
-#!/bin/bash
-exec /bin/sleep 0.05
+    cat >"$SANDBOX/bin/sleep" <<STUB
+#!/usr/bin/env bash
+exec "$real_sleep_path" 0.05
 STUB
     chmod +x "$SANDBOX/bin/sleep"
 
     # Create the cputemp control file (tests write temperatures here)
-    echo "50" > "$SANDBOX/cputemp"
+    echo "50" >"$SANDBOX/cputemp"
 
     # Clean syslog
-    : > "$SANDBOX/syslog"
+    : >"$SANDBOX/syslog"
 }
 
 # Kill daemon + remove sandbox tmp dir.  Returns (does not exit) so multi-scenario
@@ -152,7 +196,7 @@ wait_for_log() {
     local pattern="$1"
     local timeout_s="${2:-10}"
     local elapsed=0
-    while (( elapsed < timeout_s * 10 )); do
+    while ((elapsed < timeout_s * 10)); do
         if grep -q "$pattern" "$SANDBOX/syslog" 2>/dev/null; then
             return 0
         fi
@@ -171,7 +215,7 @@ wait_for_file_value() {
     local expected="$2"
     local timeout_s="${3:-15}"
     local elapsed=0
-    while (( elapsed < timeout_s * 10 )); do
+    while ((elapsed < timeout_s * 10)); do
         local val
         val=$(cat "$file" 2>/dev/null || echo "")
         if [[ "$val" == "$expected" ]]; then
@@ -192,10 +236,10 @@ wait_for_file_gt() {
     local expected="$2"
     local timeout_s="${3:-15}"
     local elapsed=0
-    while (( elapsed < timeout_s * 10 )); do
+    while ((elapsed < timeout_s * 10)); do
         local val
         val=$(cat "$file" 2>/dev/null || echo "0")
-        if (( val > expected )); then
+        if ((val > expected)); then
             return 0
         fi
         /bin/sleep 0.1

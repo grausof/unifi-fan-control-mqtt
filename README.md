@@ -11,7 +11,13 @@ Advanced temperature management for Ubiquiti UniFi OS devices with fan control, 
 
 Confirmed working on: UCG-Max, UCG-Fibre, UXG-Fibre, UDM-SE, UDM-Pro-Max, UDR7, UNVR
 
-> This project is built and maintained independently. If it keeps your UniFi gear cool and quiet, [consider supporting the original project](https://ko-fi.com/H2H719VB0U).
+**Not supported: UniFi switches (USW line).** They run BusyBox `sh` with no bash, no
+`ubnt-systool` for temperature, and no systemd — and their fans are firmware controlled
+rather than exposed as writable `/sys/class/hwmon/*/pwm*`. Confirmed on a USW Enterprise
+48 PoE running 7.5.9: no `/sys/class/hwmon/*/pwm*` entries exist at all. This needs
+consoles and gateways running full UniFi OS.
+
+> This project is built and maintained independently. If it keeps your UniFi gear cool and quiet, [consider supporting it](https://ko-fi.com/H2H719VB0U).
 
 ## Features
 - 🎛️ **Four Operational States**:
@@ -34,6 +40,7 @@ Confirmed working on: UCG-Max, UCG-Fibre, UXG-Fibre, UDM-SE, UDM-Pro-Max, UDR7, 
   - Falls back to raw sysfs device paths when needed (UDM-SE)
   - Identifies active fans by RPM reading and write-tests each channel
   - All detected fans receive the same PWM value
+- **Drive Temperature Floor**: Raises PWM for a hot NVMe or SATA drive without changing the CPU curve
 - 📡 **Optional MQTT / Home Assistant integration** (disabled by default):
   - Publishes controller state, temperature and PWM to MQTT every cycle
   - Home Assistant MQTT Discovery: sensors, an Auto Mode switch, and a Manual PWM slider
@@ -46,23 +53,54 @@ Confirmed working on: UCG-Max, UCG-Fibre, UXG-Fibre, UDM-SE, UDM-Pro-Max, UDR7, 
 
 ## Installation
 ```bash
-curl -sSL https://raw.githubusercontent.com/grausof/unifi-fan-control-mqtt/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo bash
 ```
+
+By default, the installer resolves the latest tagged release, downloads its
+runtime tarball, and verifies the tarball against that release's `SHA256SUMS`.
+The installed version is recorded in `/data/fan-control/VERSION`.
+
+### Pin a Release
+
+Use a version when you need a known build:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_VERSION=v1.2.0 bash
+```
+
+`FAN_CONTROL_VERSION` accepts `v1.2.0` or `1.2.0`. Pinned installs verify the
+matching release tarball before replacing installed files.
+
+### Release Download DNS Failures
+
+GitHub redirects verified release downloads from `github.com` to
+`release-assets.githubusercontent.com`. Both names must resolve. If the installer
+names `release-assets.githubusercontent.com`, fix the device's DNS resolver or
+allow that host first. That is a resolver failure, not a broken installer or
+release.
+
+If the installer reports that `raw.githubusercontent.com` is reachable and the
+resolver cannot be fixed immediately, a one-time fallback is available for one
+specific tag:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/v1.2.0/install.sh | sudo FAN_CONTROL_ALLOW_UNVERIFIED=v1.2.0 bash
+```
+
+This bypasses SHA256 verification for that install. It still validates the
+downloaded files before writing them, but it is not the normal or preferred path.
+`FAN_CONTROL_ALLOW_UNVERIFIED` must exactly match the tag being installed.
 
 ### Using a Different Branch
-If you want to install from a specific branch (e.g., for testing new features):
+For development builds:
 
-**Method 1: Direct URL**
 ```bash
-# Replace 'dev' with your desired branch name
-curl -sSL https://raw.githubusercontent.com/grausof/unifi-fan-control-mqtt/dev/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_BRANCH=feature/example bash
 ```
 
-**Method 2: Environment Variable**
-```bash
-# Set the branch name via environment variable
-FAN_CONTROL_BRANCH=dev curl -sSL https://raw.githubusercontent.com/grausof/unifi-fan-control-mqtt/main/install.sh | sudo bash
-```
+Branch installs download individual files from GitHub and are unverified. Do
+not use them for production routers. `FAN_CONTROL_VERSION` and
+`FAN_CONTROL_BRANCH` cannot be used together.
 
 ### Manual Installation
 If you prefer to inspect the code before installation:
@@ -71,14 +109,12 @@ If you prefer to inspect the code before installation:
 git clone https://github.com/grausof/unifi-fan-control-mqtt.git
 cd unifi-fan-control-mqtt
 
-# Optionally checkout a specific branch
-# git checkout dev
-
-# Run the installer (you can also use FAN_CONTROL_BRANCH to override the branch)
+# Run the installer from a checkout or extracted release tarball
 sudo ./install.sh
-# Or with a specific branch:
-# sudo FAN_CONTROL_BRANCH=dev ./install.sh
 ```
+
+When all four runtime files are beside `install.sh`, the installer uses those
+local files without a network request.
 
 During installation you will be asked whether to enable the optional MQTT integration
 (see [MQTT / Home Assistant Integration](#mqtt--home-assistant-integration-optional) below).
@@ -97,6 +133,13 @@ MIN_PWM=91        # Minimum active speed (0-255)
 MAX_PWM=255       # Maximum speed (0-255)
 MAX_PWM_STEP=25   # Maximum speed change per adjustment
                   # Note: Due to hardware limitations, actual PWM values may vary slightly from requested values
+
+# Drive Temperature Floor
+# auto detects a readable NVMe or SATA drive; false skips detection entirely
+DRIVE_TEMP_ENABLED=auto
+DRIVE_MIN_TEMP=50        # Start raising the PWM floor (°C)
+DRIVE_MAX_TEMP=70        # Reach maximum PWM (°C)
+DRIVE_CHECK_INTERVAL=60  # Drive temperature polling interval (seconds)
 
 # Advanced Tuning
 ALPHA=20          # Smoothing factor, lower values make the smoothed temp follow raw temp more closely (0-100 raw→smooth)
@@ -170,6 +213,9 @@ STATE: TAPER→ACTIVE (67℃ ≥ 67℃)
 SET: 55→80pwm | Reason: Ramp-up limited: 55→80pwm
 SET: 120→255pwm | Reason: EMERGENCY: Temp 86℃ ≥ 85℃
 
+# Drive Temperature Floor
+DRIVE: Detected /dev/nvme0n1 via nvme | Temp=47℃ | wctemp=83℃
+
 # Enhanced Learning System
 LEARNING: 80→85pwm (+5 (rising temp 2℃)) [Rate=7]
 LEARNING: 95→90pwm (-5 (stable below threshold)) [Rate=5]
@@ -188,6 +234,9 @@ CONFIG: Updating configuration file with corrected values
 CONFIG: Missing parameter detected: CHECK_INTERVAL
 CONFIG: Updating configuration file with 1 missing parameters
 CONFIG: Configuration file updated successfully
+
+# Deployed version
+CONFIG: fan-control vX.Y.Z starting
 
 # System Status
 STATUS: State=ACTIVE | PWM=120 | Temp=72℃
@@ -345,7 +394,53 @@ Turning off **Auto Mode** hands full control of the fan to the **Manual PWM** sl
 - **uninstall.sh**: Script to remove the fan control system (and the MQTT integration, if installed)
 - **fan-control.service**: Systemd service configuration for the main control loop
 - **mqtt-control.service**: Systemd service configuration for the optional MQTT command listener
+### Which version am I running?
+
+```bash
+cat /data/fan-control/VERSION
+journalctl -u fan-control.service | grep starting | tail -1
+# CONFIG: fan-control v1.1.1 starting
+```
+
+Neither prints anything on builds older than v1.0.0 — those predate version identity.
+
+### Updating
+
+Re-run the installer. There is no auto-update: this runs as root, and a self-updating
+root daemon is a large attack surface for a fan controller.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo bash
+```
+
+**Your config is preserved.** `/data/fan-control/config` is never overwritten by an
+install or upgrade — only the scripts and the service unit are replaced. No backup step
+is needed.
+
+### Does it survive a UniFi OS update?
+
+A normal firmware update, yes. A factory reset, no.
+
+UniFi OS runs root as an overlay: the firmware is a read-only lower layer, and anything
+you install lands in the upper layer. Both halves of this install live there — the
+systemd unit and `/data/fan-control` — so they share one fate. A firmware update swaps
+the lower layer and leaves the upper alone.
+
+What does remove it: factory reset, `reset2defaults`, re-adoption, or any recovery flow
+that rebuilds the overlay. If the service disappears and other things you installed went
+with it, that was the overlay rather than this script. Reinstall with the one-liner above.
+
+## Project Structure
+- **fan-control.sh**: The main script that monitors temperature and controls fan speed
+- **VERSION**: Bare SemVer identity for the deployed daemon
+- **install.sh**: Installation script that copies files and sets up the systemd service
+  - Uses local runtime files first, then a pinned release, branch, or latest release
+  - Verifies release tarballs and rejects unsafe archive contents before installation
+- **uninstall.sh**: Script to remove the fan control system
+- **fan-control.service**: Systemd service configuration
 - **tests/**: Sandboxed test suite (no device, no root required); run with `tests/run-tests.sh`
+- **release-please-config.json** / **.release-please-manifest.json**: Tagged-release automation configuration
+- **.github/workflows/release.yml**: Builds and verifies tagged release assets
 
 ## Star History
 
