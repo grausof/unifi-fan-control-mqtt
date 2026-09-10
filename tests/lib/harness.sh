@@ -313,17 +313,17 @@ MQTT_TEST_PORT=""
 # Start a throwaway local mosquitto broker (anonymous access, random high
 # port) for the duration of one test scenario.
 start_test_broker() {
-    MQTT_TEST_PORT=$(( 20000 + RANDOM % 10000 ))
-    cat > "$SANDBOX/mosquitto.conf" <<-CONF
+    MQTT_TEST_PORT=$((20000 + RANDOM % 10000))
+    cat >"$SANDBOX/mosquitto.conf" <<-CONF
 	listener ${MQTT_TEST_PORT} 127.0.0.1
 	allow_anonymous true
 	CONF
-    mosquitto -c "$SANDBOX/mosquitto.conf" > "$SANDBOX/mosquitto.log" 2>&1 &
+    mosquitto -c "$SANDBOX/mosquitto.conf" >"$SANDBOX/mosquitto.log" 2>&1 &
     MQTT_BROKER_PID=$!
 
     local waited=0
     while ! grep -q "mosquitto version .* running" "$SANDBOX/mosquitto.log" 2>/dev/null; do
-        (( waited >= 50 )) && fail "Test mosquitto broker did not start within 5s"
+        ((waited >= 50)) && fail "Test mosquitto broker did not start within 5s"
         /bin/sleep 0.1
         waited=$((waited + 1))
     done
@@ -344,7 +344,7 @@ MQTT_CAPTURE_PID=""
 
 start_mqtt_capture() {
     local topic_filter="$1"
-    : > "$SANDBOX/mqtt_capture.log"
+    : >"$SANDBOX/mqtt_capture.log"
     (
         source "$REPO_ROOT/mqtt-lib.sh"
         if mqtt_lib_connect "127.0.0.1" "$MQTT_TEST_PORT" "test-capture-$$" "" "" 30; then
@@ -353,7 +353,7 @@ start_mqtt_capture() {
                 mqtt_lib_read_packet 5
                 case "$MQTT_LIB_LAST_PACKET_TYPE" in
                     PUBLISH)
-                        echo "${MQTT_LIB_RX_TOPIC}|${MQTT_LIB_RX_PAYLOAD}|${MQTT_LIB_RX_RETAIN}" >> "$SANDBOX/mqtt_capture.log"
+                        echo "${MQTT_LIB_RX_TOPIC}|${MQTT_LIB_RX_PAYLOAD}|${MQTT_LIB_RX_RETAIN}" >>"$SANDBOX/mqtt_capture.log"
                         ;;
                     DISCONNECTED)
                         break
@@ -393,7 +393,7 @@ wait_for_mqtt_capture() {
     local pattern="$1"
     local timeout_s="${2:-10}"
     local elapsed=0
-    while (( elapsed < timeout_s * 10 )); do
+    while ((elapsed < timeout_s * 10)); do
         if grep -q "$pattern" "$SANDBOX/mqtt_capture.log" 2>/dev/null; then
             return 0
         fi

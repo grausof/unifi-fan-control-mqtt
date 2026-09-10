@@ -7,6 +7,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/lib/harness.sh
 source "$SCRIPT_DIR/lib/harness.sh"
 trap teardown_sandbox EXIT
 
@@ -17,7 +18,7 @@ scenario=$((scenario + 1))
 setup_sandbox
 start_test_broker
 
-cat > "$SANDBOX/config" <<-CFG
+cat >"$SANDBOX/config" <<-CFG
 MQTT_ENABLED=true
 MQTT_HOST="127.0.0.1"
 MQTT_PORT=${MQTT_TEST_PORT}
@@ -29,12 +30,12 @@ CFG
 
 start_mqtt_capture "unifi-fan-control/+/state"
 
-echo "45" > "$SANDBOX/cputemp"
+echo "45" >"$SANDBOX/cputemp"
 start_daemon
 assert_eq "$(daemon_alive && echo "alive" || echo "dead")" "alive"
 
 /bin/sleep 1
-echo "70" > "$SANDBOX/cputemp"
+echo "70" >"$SANDBOX/cputemp"
 
 wait_for_log "OFF→ACTIVE" 15 || fail "Expected OFF→ACTIVE transition"
 

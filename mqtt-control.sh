@@ -43,7 +43,7 @@ if ! flock -n 200; then
     logger -t mqtt-control "ALERT: Another instance already holds the lock (PID $(cat "$PID_FILE" 2>/dev/null))"
     exit 1
 fi
-echo $$ > "$PID_FILE"
+echo $$ >"$PID_FILE"
 trap 'rm -f "$PID_FILE" 2>/dev/null' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -54,7 +54,7 @@ atomic_write_file() {
     local content="$2"
     local temp_file="${target_file}.tmp"
 
-    if ! printf '%s\n' "$content" > "$temp_file" 2>/dev/null; then
+    if ! printf '%s\n' "$content" >"$temp_file" 2>/dev/null; then
         logger -t mqtt-control "ERROR: Failed to write to temporary file for $target_file"
         return 1
     elif ! mv "$temp_file" "$target_file" 2>/dev/null; then
@@ -76,9 +76,9 @@ load_mode_file() {
             MODE) file_mode="$value" ;;
             MANUAL_PWM_PERCENT) file_pwm="$value" ;;
         esac
-    done < "$MQTT_MODE_FILE" 2>/dev/null
+    done <"$MQTT_MODE_FILE" 2>/dev/null
     [[ "$file_mode" == "auto" || "$file_mode" == "manual" ]] && MQTT_MODE="$file_mode"
-    if [[ "$file_pwm" =~ ^[0-9]+$ ]] && (( file_pwm >= 0 && file_pwm <= 100 )); then
+    if [[ "$file_pwm" =~ ^[0-9]+$ ]] && ((file_pwm >= 0 && file_pwm <= 100)); then
         MQTT_MANUAL_PWM_PERCENT=$file_pwm
     fi
 }
@@ -91,6 +91,7 @@ MANUAL_PWM_PERCENT=${MQTT_MANUAL_PWM_PERCENT}"
 # Reload configuration (parameters may change while this service runs, e.g.
 # after re-running install.sh with different broker settings).
 reload_config() {
+    # shellcheck source=/dev/null
     source "$CONFIG_FILE" 2>/dev/null
     [[ "$MQTT_ENABLED" == "true" ]]
 }
@@ -105,7 +106,7 @@ if ! reload_config; then
 fi
 
 load_mode_file
-save_mode_file  # ensure the file exists with valid defaults from the very first run
+save_mode_file # ensure the file exists with valid defaults from the very first run
 
 MQTT_DEVICE_ID="$(hostname 2>/dev/null | tr -c 'a-zA-Z0-9_-' '-')"
 [[ -z "$MQTT_DEVICE_ID" ]] && MQTT_DEVICE_ID="unifi-fan-control"
@@ -200,7 +201,7 @@ handle_command() {
             fi
             ;;
         "$PWM_SET_TOPIC")
-            if [[ "$payload" =~ ^[0-9]+$ ]] && (( payload >= 0 && payload <= 100 )); then
+            if [[ "$payload" =~ ^[0-9]+$ ]] && ((payload >= 0 && payload <= 100)); then
                 MQTT_MANUAL_PWM_PERCENT=$payload
                 save_mode_file
                 logger -t mqtt-control "COMMAND: Manual PWM set to ${payload}%"
@@ -243,7 +244,7 @@ while true; do
     while [[ "$connection_alive" == true ]]; do
         # Wait up to just under half the keepalive interval so PINGREQ is
         # always sent well before the broker's own keepalive timeout.
-        mqtt_lib_read_packet $(( MQTT_KEEPALIVE / 2 ))
+        mqtt_lib_read_packet $((MQTT_KEEPALIVE / 2))
 
         case "$MQTT_LIB_LAST_PACKET_TYPE" in
             PUBLISH)
@@ -252,9 +253,9 @@ while true; do
             DISCONNECTED)
                 connection_alive=false
                 ;;
-            TIMEOUT|PINGRESP|OTHER)
+            TIMEOUT | PINGRESP | OTHER)
                 now=$(date +%s)
-                if (( now - last_ping >= MQTT_KEEPALIVE / 2 )); then
+                if ((now - last_ping >= MQTT_KEEPALIVE / 2)); then
                     if ! mqtt_lib_ping; then
                         connection_alive=false
                     fi

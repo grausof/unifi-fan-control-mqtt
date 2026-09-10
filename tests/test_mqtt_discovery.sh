@@ -8,6 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/lib/harness.sh
 source "$SCRIPT_DIR/lib/harness.sh"
 trap teardown_sandbox EXIT
 
@@ -18,7 +19,7 @@ scenario=$((scenario + 1))
 setup_sandbox
 start_test_broker
 
-cat > "$SANDBOX/config" <<-CFG
+cat >"$SANDBOX/config" <<-CFG
 MQTT_ENABLED=true
 MQTT_HOST="127.0.0.1"
 MQTT_PORT=${MQTT_TEST_PORT}
@@ -62,7 +63,7 @@ scenario=$((scenario + 1))
 setup_sandbox
 start_test_broker
 
-cat > "$SANDBOX/config" <<-CFG
+cat >"$SANDBOX/config" <<-CFG
 MQTT_ENABLED=true
 MQTT_HOST="127.0.0.1"
 MQTT_PORT=${MQTT_TEST_PORT}

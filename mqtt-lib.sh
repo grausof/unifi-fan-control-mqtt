@@ -1,3 +1,4 @@
+#!/bin/bash
 ###############################################################################
 # UniFi Fan Control - Minimal pure-Bash MQTT client (MQTT 3.1.1, QoS 0 only)
 #
@@ -32,26 +33,31 @@ export LC_ALL=C
 
 MQTT_LIB_FD=3
 MQTT_LIB_CONNECTED=false
-MQTT_LIB_LAST_ERROR=""
-MQTT_LIB_LAST_PACKET_TYPE=""
-MQTT_LIB_RX_TOPIC=""
-MQTT_LIB_RX_PAYLOAD=""
-MQTT_LIB_RX_RETAIN=0
+# Exported (not just declared) because these globals are read by the
+# sourcing script (fan-control.sh / mqtt-control.sh) rather than within this
+# file - export tells ShellCheck they are intentionally used externally.
+export MQTT_LIB_LAST_ERROR=""
+export MQTT_LIB_LAST_PACKET_TYPE=""
+export MQTT_LIB_RX_TOPIC=""
+export MQTT_LIB_RX_PAYLOAD=""
+export MQTT_LIB_RX_RETAIN=0
 
 # Write the raw byte for decimal value $1 (0-255) directly to the socket.
 # Bytes are streamed straight to the fd (never stored in a bash variable),
 # because bash variables cannot hold embedded NUL bytes - and MQTT length
 # prefixes routinely contain 0x00 bytes (e.g. the MSB of any length < 256).
 _mqtt_send_byte() {
-    printf "\\$(printf '%03o' "$(( $1 & 0xFF ))")" >&${MQTT_LIB_FD}
+    local octal
+    octal=$(printf '%03o' "$(($1 & 0xFF))")
+    printf '%b' "\\${octal}" >&${MQTT_LIB_FD}
 }
 
 # Write a 2-byte big-endian length prefix followed by the raw bytes of $1.
 _mqtt_send_str() {
     local s="$1"
     local len=${#s}
-    _mqtt_send_byte $(( (len >> 8) & 0xFF ))
-    _mqtt_send_byte $(( len & 0xFF ))
+    _mqtt_send_byte $(((len >> 8) & 0xFF))
+    _mqtt_send_byte $((len & 0xFF))
     printf '%s' "$s" >&${MQTT_LIB_FD}
 }
 
@@ -59,13 +65,13 @@ _mqtt_send_str() {
 _mqtt_send_remaining_length() {
     local len=$1 byte
     while true; do
-        byte=$(( len % 128 ))
-        len=$(( len / 128 ))
-        if (( len > 0 )); then
-            byte=$(( byte | 0x80 ))
+        byte=$((len % 128))
+        len=$((len / 128))
+        if ((len > 0)); then
+            byte=$((byte | 0x80))
         fi
         _mqtt_send_byte "$byte"
-        (( len == 0 )) && break
+        ((len == 0)) && break
     done
 }
 
@@ -75,7 +81,7 @@ _mqtt_send_remaining_length() {
 # through `od` as text, never captured as raw binary in a bash variable.
 _mqtt_read_bytes_dec() {
     local count=$1
-    (( count <= 0 )) && return 0
+    ((count <= 0)) && return 0
     dd bs=1 count="$count" <&${MQTT_LIB_FD} 2>/dev/null | od -An -tu1 -v | tr -s ' \n' ' '
 }
 
@@ -84,18 +90,20 @@ _mqtt_read_bytes_dec() {
 # JSON payloads used throughout this project).
 _mqtt_read_bytes_text() {
     local count=$1
-    (( count <= 0 )) && { printf ''; return 0; }
+    ((count <= 0)) && {
+        printf ''
+        return 0
+    }
     dd bs=1 count="$count" <&${MQTT_LIB_FD} 2>/dev/null
 }
 
 # Read a 2-byte big-endian length field, printing the decoded integer.
 _mqtt_read_uint16() {
-    local bytes msb lsb
+    local bytes
+    local -a b
     bytes=$(_mqtt_read_bytes_dec 2)
-    set -- $bytes
-    msb=${1:-0}
-    lsb=${2:-0}
-    printf '%d' $(( (msb << 8) | lsb ))
+    read -ra b <<<"$bytes"
+    printf '%d' $(((${b[0]:-0} << 8) | ${b[1]:-0}))
 }
 
 # Read the MQTT variable-length "remaining length" field, printing the
@@ -105,11 +113,11 @@ _mqtt_read_remaining_length() {
     while true; do
         byte_dec=$(_mqtt_read_bytes_dec 1)
         [[ -z "$byte_dec" ]] && return 1
-        value=$(( value + (byte_dec & 0x7F) * multiplier ))
-        if (( (byte_dec & 0x80) == 0 )); then
+        value=$((value + (byte_dec & 0x7F) * multiplier))
+        if (((byte_dec & 0x80) == 0)); then
             break
         fi
-        multiplier=$(( multiplier * 128 ))
+        multiplier=$((multiplier * 128))
     done
     printf '%d' "$value"
 }
@@ -138,28 +146,28 @@ mqtt_lib_connect() {
     exec 3<>"/dev/tcp/${host}/${port}"
     local tcp_rc=$?
     exec 2>&4 4>&-
-    if (( tcp_rc != 0 )); then
+    if ((tcp_rc != 0)); then
         MQTT_LIB_LAST_ERROR="tcp-connect-failed: cannot reach ${host}:${port}"
         return 1
     fi
 
-    local connect_flags=2   # bit1 = Clean Session
-    [[ -n "$user" ]] && connect_flags=$(( connect_flags | 0x80 ))
-    [[ -n "$pass" ]] && connect_flags=$(( connect_flags | 0x40 ))
+    local connect_flags=2 # bit1 = Clean Session
+    [[ -n "$user" ]] && connect_flags=$((connect_flags | 0x80))
+    [[ -n "$pass" ]] && connect_flags=$((connect_flags | 0x40))
 
-    local var_header_len=10   # "MQTT" (2+4) + level (1) + flags (1) + keepalive (2)
-    local payload_len=$(( 2 + ${#client_id} ))
-    [[ -n "$user" ]] && payload_len=$(( payload_len + 2 + ${#user} ))
-    [[ -n "$pass" ]] && payload_len=$(( payload_len + 2 + ${#pass} ))
-    local remaining=$(( var_header_len + payload_len ))
+    local var_header_len=10 # "MQTT" (2+4) + level (1) + flags (1) + keepalive (2)
+    local payload_len=$((2 + ${#client_id}))
+    [[ -n "$user" ]] && payload_len=$((payload_len + 2 + ${#user}))
+    [[ -n "$pass" ]] && payload_len=$((payload_len + 2 + ${#pass}))
+    local remaining=$((var_header_len + payload_len))
 
     _mqtt_send_byte 0x10
     _mqtt_send_remaining_length "$remaining"
     _mqtt_send_str "MQTT"
     _mqtt_send_byte 4
     _mqtt_send_byte "$connect_flags"
-    _mqtt_send_byte $(( (keepalive >> 8) & 0xFF ))
-    _mqtt_send_byte $(( keepalive & 0xFF ))
+    _mqtt_send_byte $(((keepalive >> 8) & 0xFF))
+    _mqtt_send_byte $((keepalive & 0xFF))
     _mqtt_send_str "$client_id"
     [[ -n "$user" ]] && _mqtt_send_str "$user"
     [[ -n "$pass" ]] && _mqtt_send_str "$pass"
@@ -173,13 +181,14 @@ mqtt_lib_connect() {
         return 1
     fi
     header_dec=$(printf '%d' "'$header_char")
-    if (( (header_dec & 0xF0) != 0x20 )); then
+    if (((header_dec & 0xF0) != 0x20)); then
         MQTT_LIB_LAST_ERROR="unexpected-packet-type-${header_dec}"
         _mqtt_close_socket
         return 1
     fi
 
     local ack_remaining ack_bytes return_code
+    local -a ack_arr
     ack_remaining=$(_mqtt_read_remaining_length)
     if [[ -z "$ack_remaining" ]]; then
         MQTT_LIB_LAST_ERROR="connack-read-failed"
@@ -187,8 +196,8 @@ mqtt_lib_connect() {
         return 1
     fi
     ack_bytes=$(_mqtt_read_bytes_dec "$ack_remaining")
-    set -- $ack_bytes
-    return_code="${2:-1}"
+    read -ra ack_arr <<<"$ack_bytes"
+    return_code="${ack_arr[1]:-1}"
     if [[ "$return_code" != "0" ]]; then
         MQTT_LIB_LAST_ERROR="connack-refused-rc${return_code}"
         _mqtt_close_socket
@@ -206,14 +215,17 @@ mqtt_lib_publish() {
     [[ "$MQTT_LIB_CONNECTED" == true ]] || return 1
 
     local type_byte=0x30
-    [[ "$retain_flag" == "retain" ]] && type_byte=$(( type_byte | 0x01 ))
+    [[ "$retain_flag" == "retain" ]] && type_byte=$((type_byte | 0x01))
 
-    local remaining=$(( 2 + ${#topic} + ${#payload} ))
+    local remaining=$((2 + ${#topic} + ${#payload}))
 
-    _mqtt_send_byte "$type_byte" || { MQTT_LIB_CONNECTED=false; return 1; }
+    _mqtt_send_byte "$type_byte" || {
+        MQTT_LIB_CONNECTED=false
+        return 1
+    }
     _mqtt_send_remaining_length "$remaining"
     _mqtt_send_str "$topic"
-    if ! printf '%s' "$payload" >&${MQTT_LIB_FD} 2>/dev/null; then
+    if ! { printf '%s' "$payload" >&${MQTT_LIB_FD}; } 2>/dev/null; then
         MQTT_LIB_CONNECTED=false
         return 1
     fi
@@ -225,21 +237,21 @@ mqtt_lib_publish() {
 mqtt_lib_subscribe_multi() {
     local topics=("$@")
     [[ "$MQTT_LIB_CONNECTED" == true ]] || return 1
-    (( ${#topics[@]} > 0 )) || return 1
+    ((${#topics[@]} > 0)) || return 1
 
-    local remaining=2   # packet identifier
+    local remaining=2 # packet identifier
     local t
     for t in "${topics[@]}"; do
-        remaining=$(( remaining + 2 + ${#t} + 1 ))
+        remaining=$((remaining + 2 + ${#t} + 1))
     done
 
-    _mqtt_send_byte 0x82   # SUBSCRIBE (fixed flags = 0x2 per spec)
+    _mqtt_send_byte 0x82 # SUBSCRIBE (fixed flags = 0x2 per spec)
     _mqtt_send_remaining_length "$remaining"
-    _mqtt_send_byte 0x00   # packet id MSB
-    _mqtt_send_byte 0x01   # packet id LSB (=1; fine for a single in-flight SUBSCRIBE)
+    _mqtt_send_byte 0x00 # packet id MSB
+    _mqtt_send_byte 0x01 # packet id LSB (=1; fine for a single in-flight SUBSCRIBE)
     for t in "${topics[@]}"; do
         _mqtt_send_str "$t"
-        _mqtt_send_byte 0x00   # requested QoS 0
+        _mqtt_send_byte 0x00 # requested QoS 0
     done
 
     # Best-effort read/discard of the SUBACK response.
@@ -250,8 +262,14 @@ mqtt_lib_subscribe_multi() {
 # Send a keepalive PINGREQ.
 mqtt_lib_ping() {
     [[ "$MQTT_LIB_CONNECTED" == true ]] || return 1
-    _mqtt_send_byte 0xC0 || { MQTT_LIB_CONNECTED=false; return 1; }
-    _mqtt_send_byte 0x00 || { MQTT_LIB_CONNECTED=false; return 1; }
+    _mqtt_send_byte 0xC0 || {
+        MQTT_LIB_CONNECTED=false
+        return 1
+    }
+    _mqtt_send_byte 0x00 || {
+        MQTT_LIB_CONNECTED=false
+        return 1
+    }
     return 0
 }
 
@@ -287,10 +305,10 @@ mqtt_lib_read_packet() {
     local header_char rc
     read -r -t "$timeout" -N 1 -u ${MQTT_LIB_FD} header_char
     rc=$?
-    if (( rc > 128 )); then
+    if ((rc > 128)); then
         MQTT_LIB_LAST_PACKET_TYPE="TIMEOUT"
         return 0
-    elif (( rc != 0 )) || [[ -z "$header_char" ]]; then
+    elif ((rc != 0)) || [[ -z "$header_char" ]]; then
         MQTT_LIB_LAST_PACKET_TYPE="DISCONNECTED"
         MQTT_LIB_CONNECTED=false
         return 1
@@ -298,8 +316,8 @@ mqtt_lib_read_packet() {
 
     local header_dec packet_type flags
     header_dec=$(printf '%d' "'$header_char")
-    packet_type=$(( (header_dec >> 4) & 0x0F ))
-    flags=$(( header_dec & 0x0F ))
+    packet_type=$(((header_dec >> 4) & 0x0F))
+    flags=$((header_dec & 0x0F))
 
     local remaining
     remaining=$(_mqtt_read_remaining_length)
@@ -310,25 +328,25 @@ mqtt_lib_read_packet() {
     fi
 
     case "$packet_type" in
-        3)  # PUBLISH
+        3) # PUBLISH
             local topic_len topic consumed qos payload_len payload
             topic_len=$(_mqtt_read_uint16)
             topic=$(_mqtt_read_bytes_text "$topic_len")
-            consumed=$(( 2 + topic_len ))
-            qos=$(( (flags >> 1) & 0x03 ))
-            if (( qos > 0 )); then
-                _mqtt_read_bytes_dec 2 >/dev/null   # discard packet id (QoS0 expected)
-                consumed=$(( consumed + 2 ))
+            consumed=$((2 + topic_len))
+            qos=$(((flags >> 1) & 0x03))
+            if ((qos > 0)); then
+                _mqtt_read_bytes_dec 2 >/dev/null # discard packet id (QoS0 expected)
+                consumed=$((consumed + 2))
             fi
-            payload_len=$(( remaining - consumed ))
+            payload_len=$((remaining - consumed))
             payload=""
-            if (( payload_len > 0 )); then
+            if ((payload_len > 0)); then
                 payload=$(_mqtt_read_bytes_text "$payload_len")
             fi
             MQTT_LIB_LAST_PACKET_TYPE="PUBLISH"
             MQTT_LIB_RX_TOPIC="$topic"
             MQTT_LIB_RX_PAYLOAD="$payload"
-            MQTT_LIB_RX_RETAIN=$(( flags & 0x01 ))
+            MQTT_LIB_RX_RETAIN=$((flags & 0x01))
             ;;
         13) # PINGRESP
             MQTT_LIB_LAST_PACKET_TYPE="PINGRESP"
@@ -336,7 +354,7 @@ mqtt_lib_read_packet() {
         *)
             # Consume and discard the body of packet types we don't act on
             # (CONNACK, SUBACK, UNSUBACK, etc.) so the stream stays in sync.
-            if (( remaining > 0 )); then
+            if ((remaining > 0)); then
                 dd bs=1 count="$remaining" <&${MQTT_LIB_FD} >/dev/null 2>&1
             fi
             MQTT_LIB_LAST_PACKET_TYPE="OTHER"

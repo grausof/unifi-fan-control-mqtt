@@ -640,7 +640,7 @@ enable_mqtt="${enable_mqtt:-false}"
 set_config_value() {
     local key="$1"
     local value="$2"
-    local quoted="$3"  # "quoted" to wrap value in double quotes, empty otherwise
+    local quoted="$3" # "quoted" to wrap value in double quotes, empty otherwise
 
     if [ ! -f "$CONFIG_FILE" ]; then
         echo "Warning: Config file not found, cannot set $key"

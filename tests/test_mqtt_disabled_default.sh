@@ -6,6 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/lib/harness.sh
 source "$SCRIPT_DIR/lib/harness.sh"
 trap teardown_sandbox EXIT
 
@@ -15,12 +16,12 @@ declare -i scenario=0
 scenario=$((scenario + 1))
 setup_sandbox
 
-echo "45" > "$SANDBOX/cputemp"
+echo "45" >"$SANDBOX/cputemp"
 start_daemon
 assert_eq "$(daemon_alive && echo "alive" || echo "dead")" "alive"
 
 /bin/sleep 1
-echo "70" > "$SANDBOX/cputemp"
+echo "70" >"$SANDBOX/cputemp"
 
 wait_for_log "OFF→ACTIVE" 15 || fail "Normal state machine should still work with MQTT disabled"
 
@@ -39,11 +40,11 @@ cleanup_sandbox
 scenario=$((scenario + 1))
 setup_sandbox
 
-cat > "$SANDBOX/config" <<-CFG
+cat >"$SANDBOX/config" <<-CFG
 MQTT_ENABLED=false
 CFG
 
-echo "45" > "$SANDBOX/cputemp"
+echo "45" >"$SANDBOX/cputemp"
 start_daemon
 assert_eq "$(daemon_alive && echo "alive" || echo "dead")" "alive"
 

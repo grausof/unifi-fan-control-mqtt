@@ -8,6 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/lib/harness.sh
 source "$SCRIPT_DIR/lib/harness.sh"
 trap teardown_sandbox EXIT
 
@@ -18,16 +19,16 @@ scenario=$((scenario + 1))
 setup_sandbox
 start_test_broker
 
-cat > "$SANDBOX/config" <<-CFG
+cat >"$SANDBOX/config" <<-CFG
 MQTT_ENABLED=true
 MQTT_HOST="127.0.0.1"
 MQTT_PORT=${MQTT_TEST_PORT}
 CFG
 
 # 95°C is above the default MAX_TEMP=85 (EMERGENCY territory in auto mode)
-echo "95" > "$SANDBOX/cputemp"
+echo "95" >"$SANDBOX/cputemp"
 
-cat > "$SANDBOX/mqtt_mode" <<-MODE
+cat >"$SANDBOX/mqtt_mode" <<-MODE
 MODE=manual
 MANUAL_PWM_PERCENT=40
 MODE
@@ -59,14 +60,14 @@ scenario=$((scenario + 1))
 setup_sandbox
 start_test_broker
 
-cat > "$SANDBOX/config" <<-CFG
+cat >"$SANDBOX/config" <<-CFG
 MQTT_ENABLED=true
 MQTT_HOST="127.0.0.1"
 MQTT_PORT=${MQTT_TEST_PORT}
 CFG
 
-echo "45" > "$SANDBOX/cputemp"
-cat > "$SANDBOX/mqtt_mode" <<-MODE
+echo "45" >"$SANDBOX/cputemp"
+cat >"$SANDBOX/mqtt_mode" <<-MODE
 MODE=manual
 MANUAL_PWM_PERCENT=100
 MODE
@@ -75,7 +76,7 @@ start_daemon
 wait_for_file_value "$SANDBOX/hwmon/hwmon0/pwm1" "255" 10 || fail "Manual PWM 100% should map to pwm=255"
 
 # Switch back to auto: below activation threshold, fan should go to 0 (OFF state)
-cat > "$SANDBOX/mqtt_mode" <<-MODE
+cat >"$SANDBOX/mqtt_mode" <<-MODE
 MODE=auto
 MANUAL_PWM_PERCENT=100
 MODE

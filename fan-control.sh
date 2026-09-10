@@ -44,13 +44,13 @@ DEFAULT_DRIVE_CHECK_INTERVAL=60
 # MQTT integration is OPTIONAL and disabled by default. When MQTT_ENABLED=false
 # (default), none of the MQTT code paths run and the script behaves exactly like
 # upstream fan-control.sh.
-DEFAULT_MQTT_ENABLED=false           # Enable MQTT state publishing + manual mode support
-DEFAULT_MQTT_HOST="127.0.0.1"        # MQTT broker host
-DEFAULT_MQTT_PORT=1883               # MQTT broker port
-DEFAULT_MQTT_USER=""                 # MQTT broker username (optional)
-DEFAULT_MQTT_PASSWORD=""             # MQTT broker password (optional)
-DEFAULT_MQTT_BASE_TOPIC="unifi-fan-control"  # Base topic namespace (combined with hostname)
-DEFAULT_MQTT_DISCOVERY_PREFIX="homeassistant"  # Home Assistant MQTT discovery prefix
+DEFAULT_MQTT_ENABLED=false                    # Enable MQTT state publishing + manual mode support
+DEFAULT_MQTT_HOST="127.0.0.1"                 # MQTT broker host
+DEFAULT_MQTT_PORT=1883                        # MQTT broker port
+DEFAULT_MQTT_USER=""                          # MQTT broker username (optional)
+DEFAULT_MQTT_PASSWORD=""                      # MQTT broker password (optional)
+DEFAULT_MQTT_BASE_TOPIC="unifi-fan-control"   # Base topic namespace (combined with hostname)
+DEFAULT_MQTT_DISCOVERY_PREFIX="homeassistant" # Home Assistant MQTT discovery prefix
 
 # Create config file if it doesn't exist
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -67,7 +67,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 
     # Use a temporary file and atomic move to prevent partial writes
     temp_config="${CONFIG_FILE}.tmp"
-    if ! cat >"$temp_config" <<-DEFAULTS 2>/dev/null; then
+    if ! cat >"$temp_config" <<-DEFAULTS 2>/dev/null
 MIN_PWM=$DEFAULT_MIN_PWM             # Minimum active fan speed (0-255)
 MAX_PWM=$DEFAULT_MAX_PWM            # Maximum fan speed (0-255)
 MIN_TEMP=$DEFAULT_MIN_TEMP            # Base threshold (°C)
@@ -94,6 +94,7 @@ DRIVE_MIN_TEMP=$DEFAULT_DRIVE_MIN_TEMP
 DRIVE_MAX_TEMP=$DEFAULT_DRIVE_MAX_TEMP
 DRIVE_CHECK_INTERVAL=$DEFAULT_DRIVE_CHECK_INTERVAL
 DEFAULTS
+    then
         logger -t fan-control "FATAL: Failed to write to temporary config file"
         exit 1
     elif ! mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
@@ -221,7 +222,7 @@ migrate_config() {
 
     # Rewrite config with migrated values atomically
     local temp_config="${CONFIG_FILE}.tmp"
-    if cat >"$temp_config" <<-CONFIG 2>/dev/null; then
+    if cat >"$temp_config" <<-CONFIG 2>/dev/null
 MIN_PWM=$MIN_PWM             # Minimum active fan speed (0-255)
 MAX_PWM=$MAX_PWM            # Maximum fan speed (0-255)
 MIN_TEMP=$MIN_TEMP            # Base threshold (°C)
@@ -241,6 +242,7 @@ DRIVE_MIN_TEMP=$DRIVE_MIN_TEMP
 DRIVE_MAX_TEMP=$DRIVE_MAX_TEMP
 DRIVE_CHECK_INTERVAL=$DRIVE_CHECK_INTERVAL
 CONFIG
+    then
         if mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
             logger -t fan-control "MIGRATE: Config file updated successfully"
         else
@@ -315,7 +317,7 @@ if [ "$config_changed" = true ]; then
     temp_config="${CONFIG_FILE}.tmp"
 
     # Write corrected values to temp file
-    if ! cat >"$temp_config" <<-CONFIG 2>/dev/null; then
+    if ! cat >"$temp_config" <<-CONFIG 2>/dev/null
 MIN_PWM=$MIN_PWM             # Minimum active fan speed (0-255)
 MAX_PWM=$MAX_PWM            # Maximum fan speed (0-255)
 MIN_TEMP=$MIN_TEMP            # Base threshold (°C)
@@ -335,6 +337,7 @@ DRIVE_MIN_TEMP=$DRIVE_MIN_TEMP
 DRIVE_MAX_TEMP=$DRIVE_MAX_TEMP
 DRIVE_CHECK_INTERVAL=$DRIVE_CHECK_INTERVAL
 CONFIG
+    then
         logger -t fan-control "ERROR: Failed to write to temporary config file"
         # Continue with current in-memory values, but don't update the file
     elif ! mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
@@ -1177,7 +1180,7 @@ _mqtt_ensure_lib_loaded() {
 mqtt_publish() {
     local topic="$1"
     local payload="$2"
-    local retain_flag="$3"  # "retain" to set the MQTT retain flag, empty otherwise
+    local retain_flag="$3" # "retain" to set the MQTT retain flag, empty otherwise
 
     [[ "$MQTT_ENABLED" == "true" ]] || return 0
     _mqtt_ensure_lib_loaded || return 1
@@ -1215,7 +1218,7 @@ mqtt_publish_state() {
     local payload
     payload=$(printf '{"state":"%s","mode":"%s","temp_smooth":%s,"pwm":%s,"pwm_percent":%s}' \
         "$state_name" "$MQTT_MODE" "$SMOOTHED_TEMP" "$LAST_PWM" \
-        "$(( (LAST_PWM * 100 + 127) / 255 ))")
+        "$(((LAST_PWM * 100 + 127) / 255))")
 
     mqtt_publish "$MQTT_STATE_TOPIC" "$payload" "retain"
 }
@@ -1233,12 +1236,12 @@ mqtt_load_mode() {
             MODE) file_mode="$value" ;;
             MANUAL_PWM_PERCENT) file_pwm="$value" ;;
         esac
-    done < "$MQTT_MODE_FILE" 2>/dev/null
+    done <"$MQTT_MODE_FILE" 2>/dev/null
 
     if [[ "$file_mode" == "auto" || "$file_mode" == "manual" ]]; then
         MQTT_MODE="$file_mode"
     fi
-    if [[ "$file_pwm" =~ ^[0-9]+$ ]] && (( file_pwm >= 0 && file_pwm <= 100 )); then
+    if [[ "$file_pwm" =~ ^[0-9]+$ ]] && ((file_pwm >= 0 && file_pwm <= 100)); then
         MQTT_MANUAL_PWM_PERCENT=$file_pwm
     fi
 }
@@ -1250,14 +1253,14 @@ mqtt_load_mode() {
 # override, even at critical temperatures.
 apply_manual_pwm() {
     local percent=$MQTT_MANUAL_PWM_PERCENT
-    local pwm=$(( (percent * 255 + 50) / 100 ))
-    (( pwm > 255 )) && pwm=255
-    (( pwm < 0 )) && pwm=0
+    local pwm=$(((percent * 255 + 50) / 100))
+    ((pwm > 255)) && pwm=255
+    ((pwm < 0)) && pwm=0
 
     if [[ "$pwm" -ne "$LAST_PWM" ]]; then
         local write_ok=true
         for pwm_dev in "${FAN_PWM_DEVICES[@]}"; do
-            if ! echo "$pwm" > "$pwm_dev" 2>/dev/null; then
+            if ! echo "$pwm" >"$pwm_dev" 2>/dev/null; then
                 logger -t fan-control "ERROR: Failed to write to PWM device $pwm_dev (manual mode)"
                 write_ok=false
             fi
@@ -1471,7 +1474,7 @@ while true; do
     fi
 
     # Log status every 10 iterations
-    (( loop_counter++ % 10 == 0 )) && {
+    ((loop_counter++ % 10 == 0)) && {
         if [[ "$MQTT_MODE" == "manual" ]]; then
             state_name="MANUAL"
         else
