@@ -608,7 +608,7 @@ install_validated_payload
 # No external MQTT client (mosquitto-clients) is required: UniFi OS devices
 # have no package manager to install it with, so this integration uses a
 # pure-Bash MQTT client (mqtt-lib.sh, plaintext MQTT only - no TLS).
-CONFIG_FILE="/data/fan-control/config"
+CONFIG_FILE="$INSTALL_DIR/config"
 
 # Wait briefly for fan-control.sh to bootstrap the config file on first start.
 for _ in 1 2 3 4 5; do
@@ -634,6 +634,33 @@ if [ -z "$enable_mqtt" ] && [ -n "$TTY" ]; then
     esac
 fi
 enable_mqtt="${enable_mqtt:-false}"
+
+# Files that are part of the optional MQTT integration (mqtt-lib.sh,
+# mqtt-control.sh, mqtt-control.service) have no equivalent in the upstream
+# project, so they are never part of the checksum-verified PAYLOAD_FILES
+# release pipeline above and have no signed/checksummed release channel of
+# their own. Rather than fetch them unverified over the network, MQTT
+# support requires running install.sh from a git checkout (or extracted
+# release tarball) of this fork with these files present alongside it -
+# fail fast, before asking anything, if that's not the case.
+if [ "$enable_mqtt" = "true" ]; then
+    for _mqtt_file in mqtt-lib.sh mqtt-control.sh mqtt-control.service; do
+        if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/$_mqtt_file" ]; then
+            fail "MQTT integration requires running install.sh from a git clone of" \
+                "https://github.com/grausof/unifi-fan-control-mqtt (missing $_mqtt_file" \
+                "next to install.sh). Clone the repository and re-run ./install.sh from" \
+                "there; the curl-pipe one-liner install does not include the MQTT files."
+        fi
+    done
+    unset _mqtt_file
+fi
+
+get_file() {
+    local filename="$1"
+    local destination="$2"
+
+    cp "$SCRIPT_DIR/$filename" "$destination" || fail "Failed to copy $filename to $destination"
+}
 
 # Update a KEY=VALUE (optionally quoted) line in the config file, preserving
 # any trailing inline comment.
@@ -685,28 +712,33 @@ if [ "$enable_mqtt" = "true" ]; then
     set_config_value "MQTT_USER" "$mqtt_user" "quoted"
     set_config_value "MQTT_PASSWORD" "$mqtt_password" "quoted"
 
+    # Deploy the pure-Bash MQTT client library that fan-control.sh sources at
+    # runtime. This is not part of PAYLOAD_FILES (see get_file() above) and
+    # would otherwise never reach the device even with MQTT_ENABLED=true.
+    get_file "mqtt-lib.sh" "$INSTALL_DIR/mqtt-lib.sh"
+
     # Deploy and start the MQTT command listener service
-    get_file "mqtt-control.sh" "/data/fan-control/mqtt-control.sh"
-    chmod +x /data/fan-control/mqtt-control.sh
+    get_file "mqtt-control.sh" "$INSTALL_DIR/mqtt-control.sh"
+    chmod +x "$INSTALL_DIR/mqtt-control.sh"
 
     MQTT_SERVICE_FILE="/etc/systemd/system/mqtt-control.service"
     get_file "mqtt-control.service" "$MQTT_SERVICE_FILE"
 
-    systemctl daemon-reload || {
+    "$SYSTEMCTL" daemon-reload || {
         echo "Error: Failed to reload systemd configuration"
         exit 1
     }
 
     echo "Restarting fan-control.service to apply MQTT configuration..."
-    systemctl restart fan-control.service || {
+    "$SYSTEMCTL" restart fan-control.service || {
         echo "Error: Failed to restart fan-control.service"
         exit 1
     }
 
-    if systemctl is-active --quiet mqtt-control.service; then
-        systemctl restart mqtt-control.service
+    if "$SYSTEMCTL" is-active --quiet mqtt-control.service; then
+        "$SYSTEMCTL" restart mqtt-control.service
     else
-        systemctl enable --now mqtt-control.service || {
+        "$SYSTEMCTL" enable --now mqtt-control.service || {
             echo "Error: Failed to enable and start mqtt-control.service"
             echo "Check service status with: systemctl status mqtt-control.service"
             exit 1

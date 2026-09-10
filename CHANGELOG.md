@@ -123,6 +123,16 @@ The daemon logs `CONFIG: fan-control vX.Y.Z starting`, and `VERSION` is installe
   `MAX_TEMP` forces full speed and switches back to Auto Mode (persisted so Home
   Assistant's Auto Mode switch reflects it), protecting against a low manual value
   being left in place unnoticed.
+- `install.sh`'s MQTT setup called an undefined `get_file` function, crashing with
+  `command not found` as soon as MQTT was enabled, right after the config file had
+  already been updated with `MQTT_ENABLED=true`. Separately, `mqtt-lib.sh` itself was
+  never deployed to the device by any code path, so `fan-control.sh` would have
+  silently disabled MQTT publishing even if the crash hadn't stopped the installer
+  first. `get_file` is now implemented, deploys `mqtt-lib.sh` alongside
+  `mqtt-control.sh`/`mqtt-control.service`, and — since none of these files exist in
+  the upstream project or have a signed release channel of their own — is local-only:
+  MQTT setup now fails fast with a clear message if it isn't run from a git clone of
+  this repository, rather than falling back to an unverified network download.
 - [#17](https://github.com/iceteaSA/unifi-fan-control/issues/17): Lock and cleanup trap were registered in a subshell that exited immediately. Moved `flock` and `trap` to the parent shell so the lock is held for the daemon's lifetime, cleanup runs on actual exit, and single-instance guard is authoritative.
 - [#18](https://github.com/iceteaSA/unifi-fan-control/issues/18): `get_smoothed_temp` was called via `$(...)`, losing `TEMP_READ_FAILURES` and `SMOOTHED_TEMP` mutations in subshells. Rewrote to communicate via globals; added a sensor fail-safe in `update_fan_state` that forces `MAX_PWM` after 3 consecutive read failures, bypassing state-machine and ramp limits.
 - Fan speed no longer increases as the device cools below the activation temperature; the quadratic curve now clamps sub-activation `temp_diff` to zero (#26).

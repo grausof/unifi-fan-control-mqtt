@@ -120,6 +120,13 @@ During installation you will be asked whether to enable the optional MQTT integr
 (see [MQTT / Home Assistant Integration](#mqtt--home-assistant-integration-optional) below).
 Answering "no" (the default) installs and behaves exactly like the upstream project.
 
+> **MQTT requires Manual Installation.** The one-liner installs above only fetch the
+> four core upstream files and never include `mqtt-lib.sh`, `mqtt-control.sh` or
+> `mqtt-control.service` (they don't exist in the upstream project and have no signed
+> release channel of their own). To enable MQTT you must `git clone` this repository as
+> shown below and run `sudo ./install.sh` from the checkout, so those files are present
+> locally next to the installer.
+
 ## Configuration
 Edit `/data/fan-control/config`:
 ```bash
@@ -336,8 +343,9 @@ required.
   `FAN_CONTROL_MQTT_HOST`, `FAN_CONTROL_MQTT_PORT`, `FAN_CONTROL_MQTT_USER`,
   `FAN_CONTROL_MQTT_PASSWORD`) as environment variables before running the installer.
 - **Later**: edit `/data/fan-control/config` (set `MQTT_ENABLED=true` and the `MQTT_*`
-  parameters), then re-run `install.sh` to deploy and start the `mqtt-control.service`
-  companion service.
+  parameters), then re-run `./install.sh` **from a git clone of this repository** (see
+  [Manual Installation](#manual-installation)) to deploy and start the
+  `mqtt-control.service` companion service.
 
 ### Architecture
 Two independent systemd services are involved:
