@@ -20,6 +20,11 @@ assert_eq() {
     local expected="$2"
     local message="$3"
 
+    # Trim whitespace: some wc(1) implementations (e.g. macOS/BSD) pad -l
+    # output with leading spaces.
+    actual="${actual//[[:space:]]/}"
+    expected="${expected//[[:space:]]/}"
+
     [[ "$actual" == "$expected" ]] || fail "${message}: expected ${expected}, got ${actual}"
 }
 
@@ -65,15 +70,23 @@ done
 
 for block in 1 2 3; do
     sort -u "$WORK_DIR/heredoc-${block}" >"$WORK_DIR/heredoc-${block}.sorted"
-    assert_eq "$(wc -l <"$WORK_DIR/heredoc-${block}.sorted")" "18" \
-        "heredoc ${block} parameter count"
 done
 
 sed -n 's/^DEFAULT_\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$DAEMON" | sort -u >"$WORK_DIR/defaults.sorted"
 sed -n 's/^[[:space:]]*check_param "\([A-Z][A-Z0-9_]*\)".*/\1/p' "$DAEMON" | sort -u >"$WORK_DIR/check-params.sorted"
 
-assert_eq "$(wc -l <"$WORK_DIR/defaults.sorted")" "18" "DEFAULT declaration count"
-assert_eq "$(wc -l <"$WORK_DIR/check-params.sorted")" "18" "check_param declaration count"
+# The expected count is derived from the DEFAULT_* declarations rather than
+# hardcoded, so this guard keeps working as parameters are added/removed -
+# what it actually protects against is the three rewrite paths (and the
+# check_param self-healing list) silently drifting apart from each other.
+expected_count="$(wc -l <"$WORK_DIR/defaults.sorted")"
+
+for block in 1 2 3; do
+    assert_eq "$(wc -l <"$WORK_DIR/heredoc-${block}.sorted")" "$expected_count" \
+        "heredoc ${block} parameter count"
+done
+
+assert_eq "$(wc -l <"$WORK_DIR/check-params.sorted")" "$expected_count" "check_param declaration count"
 assert_same_set "$WORK_DIR/heredoc-1.sorted" "$WORK_DIR/heredoc-2.sorted" \
     "initial and migration config parameter sets"
 assert_same_set "$WORK_DIR/heredoc-1.sorted" "$WORK_DIR/heredoc-3.sorted" \
@@ -83,4 +96,4 @@ assert_same_set "$WORK_DIR/heredoc-1.sorted" "$WORK_DIR/defaults.sorted" \
 assert_same_set "$WORK_DIR/heredoc-1.sorted" "$WORK_DIR/check-params.sorted" \
     "config heredocs and check_param declarations"
 
-printf '✓ All 18 config parameters are present in every rewrite path\n'
+printf '✓ All %s config parameters are present in every rewrite path\n' "${expected_count//[[:space:]]/}"

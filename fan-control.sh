@@ -237,6 +237,13 @@ MAX_PWM_STEP=$MAX_PWM_STEP        # Max PWM change per adjustment
 DEADBAND=$DEADBAND             # Temp stability threshold (°C)
 ALPHA=$ALPHA               # Smoothing factor (0-100)
 LEARNING_RATE=$LEARNING_RATE        # PWM optimization step size
+MQTT_ENABLED=$MQTT_ENABLED        # Enable MQTT state publishing + manual mode support (optional feature)
+MQTT_HOST="$MQTT_HOST"        # MQTT broker host
+MQTT_PORT=$MQTT_PORT        # MQTT broker port
+MQTT_USER="$MQTT_USER"        # MQTT broker username (optional)
+MQTT_PASSWORD="$MQTT_PASSWORD"        # MQTT broker password (optional)
+MQTT_BASE_TOPIC="$MQTT_BASE_TOPIC"        # Base topic namespace (combined with hostname)
+MQTT_DISCOVERY_PREFIX="$MQTT_DISCOVERY_PREFIX"        # Home Assistant MQTT discovery prefix
 DRIVE_TEMP_ENABLED=$DRIVE_TEMP_ENABLED
 DRIVE_MIN_TEMP=$DRIVE_MIN_TEMP
 DRIVE_MAX_TEMP=$DRIVE_MAX_TEMP
@@ -332,6 +339,13 @@ MAX_PWM_STEP=$MAX_PWM_STEP        # Max PWM change per adjustment
 DEADBAND=$DEADBAND             # Temp stability threshold (°C)
 ALPHA=$ALPHA               # Smoothing factor (0-100)
 LEARNING_RATE=$LEARNING_RATE        # PWM optimization step size
+MQTT_ENABLED=$MQTT_ENABLED        # Enable MQTT state publishing + manual mode support (optional feature)
+MQTT_HOST="$MQTT_HOST"        # MQTT broker host
+MQTT_PORT=$MQTT_PORT        # MQTT broker port
+MQTT_USER="$MQTT_USER"        # MQTT broker username (optional)
+MQTT_PASSWORD="$MQTT_PASSWORD"        # MQTT broker password (optional)
+MQTT_BASE_TOPIC="$MQTT_BASE_TOPIC"        # Base topic namespace (combined with hostname)
+MQTT_DISCOVERY_PREFIX="$MQTT_DISCOVERY_PREFIX"        # Home Assistant MQTT discovery prefix
 DRIVE_TEMP_ENABLED=$DRIVE_TEMP_ENABLED
 DRIVE_MIN_TEMP=$DRIVE_MIN_TEMP
 DRIVE_MAX_TEMP=$DRIVE_MAX_TEMP
@@ -1147,6 +1161,10 @@ MQTT_DEVICE_ID="$(hostname 2>/dev/null | tr -c 'a-zA-Z0-9_-' '-')"
 [[ -z "$MQTT_DEVICE_ID" ]] && MQTT_DEVICE_ID="unifi-fan-control"
 MQTT_STATE_TOPIC="${MQTT_BASE_TOPIC}/${MQTT_DEVICE_ID}/state"
 MQTT_WARNED_MISSING_CLIENT=false
+# Hard upper bound (seconds) on a single publish (connect+publish+disconnect).
+# Not user-configurable: it exists purely to protect the control loop and
+# isn't a broker-tuning knob, so it isn't part of the persisted config file.
+MQTT_PUBLISH_TIMEOUT=3
 
 # Current MQTT-driven mode, refreshed every loop iteration from MQTT_MODE_FILE.
 # Defaults to "auto" so behavior is identical to upstream unless mqtt-control.sh
@@ -1171,6 +1189,35 @@ _mqtt_ensure_lib_loaded() {
     source "$MQTT_LIB_FILE"
     MQTT_LIB_LOADED=true
     return 0
+}
+
+# Run a command in the background and forcibly kill it if it doesn't finish
+# within the given number of seconds. `/dev/tcp` has no connect timeout of its
+# own, so without this a broker host that drops SYN packets (as opposed to
+# actively refusing the connection) can block the calling command for minutes
+# (observed: tcp_syn_retries defaults can stretch this past 120s). This keeps
+# that risk off the main control loop without depending on GNU coreutils'
+# external `timeout` binary, which may not be present on every device.
+# Usage: _mqtt_run_with_timeout <timeout_seconds> <command> [args...]
+_mqtt_run_with_timeout() {
+    local timeout_s="$1"
+    shift
+
+    "$@" &
+    local watched_pid=$!
+
+    local -i waited_cs=0
+    local -i timeout_cs=$((timeout_s * 10))
+    while kill -0 "$watched_pid" 2>/dev/null; do
+        if ((waited_cs >= timeout_cs)); then
+            kill -9 "$watched_pid" 2>/dev/null
+            wait "$watched_pid" 2>/dev/null
+            return 124 # same convention as GNU coreutils timeout
+        fi
+        sleep 0.1
+        waited_cs+=1
+    done
+    wait "$watched_pid"
 }
 
 # Publish a single message to the MQTT broker using the pure-Bash MQTT client
@@ -1220,7 +1267,13 @@ mqtt_publish_state() {
         "$state_name" "$MQTT_MODE" "$SMOOTHED_TEMP" "$LAST_PWM" \
         "$(((LAST_PWM * 100 + 127) / 255))")
 
-    mqtt_publish "$MQTT_STATE_TOPIC" "$payload" "retain"
+    # Bounded: a stalled/unreachable broker host must never stall the
+    # temperature control loop (see _mqtt_run_with_timeout above).
+    local publish_rc=0
+    _mqtt_run_with_timeout "$MQTT_PUBLISH_TIMEOUT" mqtt_publish "$MQTT_STATE_TOPIC" "$payload" "retain" || publish_rc=$?
+    if ((publish_rc == 124)); then
+        logger -t fan-control "WARNING: MQTT publish timed out after ${MQTT_PUBLISH_TIMEOUT}s - skipping this cycle"
+    fi
 }
 
 # Reload the manual/auto mode written by mqtt-control.sh. The file uses simple
@@ -1246,11 +1299,24 @@ mqtt_load_mode() {
     fi
 }
 
+# Persist the current mode back to MQTT_MODE_FILE. Normally mqtt-control.sh is
+# the only writer (in response to an HA command), but the MAX_TEMP safety
+# backstop below also needs to write here directly: forcing MQTT_MODE=auto
+# in this process alone wouldn't survive the next mqtt_load_mode call (which
+# would immediately read the old "manual" value back from the file and undo
+# it), and it wouldn't tell mqtt-control.sh/HA that the switch flipped.
+mqtt_save_mode() {
+    atomic_write_file "$MQTT_MODE_FILE" "MODE=${MQTT_MODE}
+MANUAL_PWM_PERCENT=${MQTT_MANUAL_PWM_PERCENT}"
+}
+
 # Apply the manual PWM percentage directly to every detected fan channel,
-# bypassing the state machine, ramp limits, MIN/MAX enforcement and the
-# EMERGENCY fail-safe entirely. This is an explicit user choice: in manual
-# mode the fan stays exactly at the requested speed, with no automatic
-# override, even at critical temperatures.
+# bypassing the state machine and ramp/MIN/MAX enforcement. This is an
+# explicit user choice: in manual mode the fan stays exactly at the requested
+# speed with no automatic adjustment - EXCEPT for the MAX_TEMP safety
+# backstop in the main loop below, which forces Auto Mode back on if the
+# device gets critically hot while a manual value is in effect (e.g. left at
+# a low speed by an HA automation and forgotten).
 apply_manual_pwm() {
     local percent=$MQTT_MANUAL_PWM_PERCENT
     local pwm=$(((percent * 255 + 50) / 100))
@@ -1455,10 +1521,18 @@ while true; do
 
     if [[ "$MQTT_MODE" == "manual" ]]; then
         # Manual mode (set via Home Assistant): still track temperature for
-        # telemetry, but bypass the state machine entirely - no EMERGENCY
-        # failsafe override while manual mode is active (explicit user choice).
+        # telemetry, and bypass the state machine's normal ramp/deadband
+        # logic - but the MAX_TEMP safety backstop always applies, even here.
         get_smoothed_temp
-        apply_manual_pwm
+        if ((SMOOTHED_TEMP >= MAX_TEMP)); then
+            logger -t fan-control "ALERT: MANUAL PWM backstop triggered (${SMOOTHED_TEMP}°C ≥ MAX_TEMP ${MAX_TEMP}°C) - forcing Auto Mode"
+            MQTT_MODE="auto"
+            mqtt_save_mode
+            CURRENT_STATE=$STATE_EMERGENCY
+            set_fan_speed "$MAX_PWM"
+        else
+            apply_manual_pwm
+        fi
     else
         update_fan_state
     fi
