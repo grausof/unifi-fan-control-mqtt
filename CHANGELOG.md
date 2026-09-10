@@ -20,7 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * diagnose install failures precisely and harden the tar header walk ([#44](https://github.com/iceteaSA/unifi-fan-control/issues/44)) ([a014711](https://github.com/iceteaSA/unifi-fan-control/commit/a0147114001ad1f2c905a445385bd8eada0e4f60))
 * drive floor follows the hottest drive across all readable drives ([#43](https://github.com/iceteaSA/unifi-fan-control/issues/43)) ([8859849](https://github.com/iceteaSA/unifi-fan-control/commit/885984983db81dc09b08669472dc9c17505df5d4))
 
-## [Unreleased]
+## [1.3.0](https://github.com/grausof/unifi-fan-control-mqtt/compare/v1.2.2...v1.3.0) (2026-09-10)
+
+### Added
+- **Optional MQTT / Home Assistant integration**, disabled by default (`MQTT_ENABLED=false`):
+  - `fan-control.sh` now publishes a retained JSON state message (state, temperature, PWM, mode) to MQTT every cycle when enabled, and supports a manual PWM bypass mode with a MAX_TEMP safety backstop (see Fixed, below), persisted across reboots.
+  - New `mqtt-lib.sh`: a **pure-Bash MQTT 3.1.1 client** (CONNECT/PUBLISH/SUBSCRIBE/PINGREQ over bash's `/dev/tcp`, QoS 0, no TLS). No external MQTT client (`mosquitto-clients`) is required or used, since UniFi OS devices have no package manager to install one with.
+  - New `mqtt-control.sh` companion script/service: publishes Home Assistant MQTT Discovery messages (sensors, an Auto Mode switch, a Manual PWM 0-100% number slider) and listens for commands, using `mqtt-lib.sh`.
+  - New `mqtt-control.service` systemd unit, installed only when MQTT is enabled.
+  - `install.sh` now prompts (or accepts `FAN_CONTROL_ENABLE_MQTT`/`FAN_CONTROL_MQTT_*` env vars) to optionally configure and deploy the MQTT integration; `uninstall.sh` removes it if present.
+  - `mqtt-lib.sh`, `mqtt-control.sh` and `mqtt-control.service` are part of `install.sh`'s `PAYLOAD_FILES`, so they are fetched through the same checksum-verified release / unverified-branch / local-checkout pipeline as the four core files.
+  - New env-var seams for testability: `FAN_CONTROL_MQTT_MODE_FILE`, `FAN_CONTROL_MQTT_PID_FILE`, `FAN_CONTROL_MQTT_SERVICE_FILE`.
+  - New test files: `test_mqtt_disabled_default.sh`, `test_mqtt_publish.sh`, `test_mqtt_manual_bypass.sh`, `test_mqtt_discovery.sh`, `test_mqtt_lib.sh`, exercising the pure-Bash client against a real local test broker.
 
 ### Fixed
 
@@ -28,6 +39,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now name the failing host and explain GitHub's release-asset redirect.
 * Add a tag-scoped `FAN_CONTROL_ALLOW_UNVERIFIED` fallback for a verified download
   that cannot complete. The fallback is explicit and still validates its payload.
+* MQTT publish no longer risks stalling the temperature control loop. `/dev/tcp` has
+  no connect timeout, so a broker host that drops SYN packets (rather than actively
+  refusing the connection) could previously block the publish for minutes. Added a
+  pure-Bash timeout watchdog bounding every publish to 3 seconds.
+* The two config-rewrite heredocs used by `migrate_config`/`validate_config` were
+  missing the 7 MQTT parameters present in the initial-create heredoc, so the first
+  migration or value-clamp after enabling MQTT would silently reset a user's broker
+  settings to their defaults. All three rewrite paths now stay in sync, and
+  `test_config_parity.sh` derives its expected parameter count dynamically instead
+  of a hardcoded value so this class of bug can't reappear unnoticed.
+* Manual mode now has a `MAX_TEMP` safety backstop: below `MAX_TEMP` the fan stays
+  exactly at the requested manual PWM with no automatic adjustment, but reaching
+  `MAX_TEMP` forces full speed and switches back to Auto Mode (persisted so Home
+  Assistant's Auto Mode switch reflects it), protecting against a low manual value
+  being left in place unnoticed.
+* `install.sh`'s MQTT setup called an undefined `get_file` function, crashing with
+  `command not found` as soon as MQTT was enabled, right after the config file had
+  already been updated with `MQTT_ENABLED=true`. Separately, `mqtt-lib.sh` itself was
+  never deployed to the device by any code path, so `fan-control.sh` would have
+  silently disabled MQTT publishing even if the crash hadn't stopped the installer
+  first. `mqtt-lib.sh`, `mqtt-control.sh` and `mqtt-control.service` are now part of
+  `install.sh`'s `PAYLOAD_FILES`, so they go through the exact same checksum-verified
+  release / unverified-branch / local-checkout pipeline as the four core files
+  instead of a separate, local-only code path — the one-liner and branch installs
+  cover MQTT too, with no `git clone` requirement.
 
 ## [1.2.0](https://github.com/iceteaSA/unifi-fan-control/compare/v1.1.1...v1.2.0) (2026-08-09)
 
@@ -80,17 +116,7 @@ The daemon logs `CONFIG: fan-control vX.Y.Z starting`, and `VERSION` is installe
 * CI runs them on bash 4.4, 5.1, 5.2 and native Ubuntu, all under mawk — matching the UCG-Max, which runs bash 5.1.4 and mawk 1.3.4.
 * shellcheck and shfmt are enforced at zero findings.
 
-## [Unreleased]
-
 ### Added
-- **Optional MQTT / Home Assistant integration**, disabled by default (`MQTT_ENABLED=false`):
-  - `fan-control.sh` now publishes a retained JSON state message (state, temperature, PWM, mode) to MQTT every cycle when enabled, and supports a manual PWM bypass mode with a MAX_TEMP safety backstop (see Fixed, below), persisted across reboots.
-  - New `mqtt-lib.sh`: a **pure-Bash MQTT 3.1.1 client** (CONNECT/PUBLISH/SUBSCRIBE/PINGREQ over bash's `/dev/tcp`, QoS 0, no TLS). No external MQTT client (`mosquitto-clients`) is required or used, since UniFi OS devices have no package manager to install one with.
-  - New `mqtt-control.sh` companion script/service: publishes Home Assistant MQTT Discovery messages (sensors, an Auto Mode switch, a Manual PWM 0-100% number slider) and listens for commands, using `mqtt-lib.sh`.
-  - New `mqtt-control.service` systemd unit, installed only when MQTT is enabled.
-  - `install.sh` now prompts (or accepts `FAN_CONTROL_ENABLE_MQTT`/`FAN_CONTROL_MQTT_*` env vars) to optionally configure and deploy the MQTT integration; `uninstall.sh` removes it if present.
-  - New env-var seams for testability: `FAN_CONTROL_MQTT_MODE_FILE`, `FAN_CONTROL_MQTT_PID_FILE`.
-  - New test files: `test_mqtt_disabled_default.sh`, `test_mqtt_publish.sh`, `test_mqtt_manual_bypass.sh`, `test_mqtt_discovery.sh`, exercising the pure-Bash client against a real local test broker.
 - Tagged release automation with verified runtime tarballs and `SHA256SUMS`.
 - Verified release installation with latest-release resolution and
   `FAN_CONTROL_VERSION` pinning.
@@ -108,31 +134,6 @@ The daemon logs `CONFIG: fan-control vX.Y.Z starting`, and `VERSION` is installe
 - GitHub pull request template
 
 ### Fixed
-- MQTT publish no longer risks stalling the temperature control loop. `/dev/tcp` has
-  no connect timeout, so a broker host that drops SYN packets (rather than actively
-  refusing the connection) could previously block the publish for minutes. Added a
-  pure-Bash timeout watchdog bounding every publish to 3 seconds.
-- The two config-rewrite heredocs used by `migrate_config`/`validate_config` were
-  missing the 7 MQTT parameters present in the initial-create heredoc, so the first
-  migration or value-clamp after enabling MQTT would silently reset a user's broker
-  settings to their defaults. All three rewrite paths now stay in sync, and
-  `test_config_parity.sh` derives its expected parameter count dynamically instead
-  of a hardcoded value so this class of bug can't reappear unnoticed.
-- Manual mode now has a `MAX_TEMP` safety backstop: below `MAX_TEMP` the fan stays
-  exactly at the requested manual PWM with no automatic adjustment, but reaching
-  `MAX_TEMP` forces full speed and switches back to Auto Mode (persisted so Home
-  Assistant's Auto Mode switch reflects it), protecting against a low manual value
-  being left in place unnoticed.
-- `install.sh`'s MQTT setup called an undefined `get_file` function, crashing with
-  `command not found` as soon as MQTT was enabled, right after the config file had
-  already been updated with `MQTT_ENABLED=true`. Separately, `mqtt-lib.sh` itself was
-  never deployed to the device by any code path, so `fan-control.sh` would have
-  silently disabled MQTT publishing even if the crash hadn't stopped the installer
-  first. `mqtt-lib.sh`, `mqtt-control.sh` and `mqtt-control.service` are now part of
-  `install.sh`'s `PAYLOAD_FILES`, so they go through the exact same checksum-verified
-  release / unverified-branch / local-checkout pipeline as the four core files
-  instead of a separate, local-only code path — the one-liner and branch installs
-  cover MQTT too, with no `git clone` requirement.
 - [#17](https://github.com/iceteaSA/unifi-fan-control/issues/17): Lock and cleanup trap were registered in a subshell that exited immediately. Moved `flock` and `trap` to the parent shell so the lock is held for the daemon's lifetime, cleanup runs on actual exit, and single-instance guard is authoritative.
 - [#18](https://github.com/iceteaSA/unifi-fan-control/issues/18): `get_smoothed_temp` was called via `$(...)`, losing `TEMP_READ_FAILURES` and `SMOOTHED_TEMP` mutations in subshells. Rewrote to communicate via globals; added a sensor fail-safe in `update_fan_state` that forces `MAX_PWM` after 3 consecutive read failures, bypassing state-machine and ramp limits.
 - Fan speed no longer increases as the device cools below the activation temperature; the quadratic curve now clamps sub-activation `temp_diff` to zero (#26).
