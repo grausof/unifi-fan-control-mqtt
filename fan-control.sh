@@ -67,7 +67,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 
     # Use a temporary file and atomic move to prevent partial writes
     temp_config="${CONFIG_FILE}.tmp"
-    if ! cat >"$temp_config" <<-DEFAULTS 2>/dev/null
+    if ! cat >"$temp_config" <<-DEFAULTS 2>/dev/null; then
 MIN_PWM=$DEFAULT_MIN_PWM             # Minimum active fan speed (0-255)
 MAX_PWM=$DEFAULT_MAX_PWM            # Maximum fan speed (0-255)
 MIN_TEMP=$DEFAULT_MIN_TEMP            # Base threshold (°C)
@@ -94,7 +94,6 @@ DRIVE_MIN_TEMP=$DEFAULT_DRIVE_MIN_TEMP
 DRIVE_MAX_TEMP=$DEFAULT_DRIVE_MAX_TEMP
 DRIVE_CHECK_INTERVAL=$DEFAULT_DRIVE_CHECK_INTERVAL
 DEFAULTS
-    then
         logger -t fan-control "FATAL: Failed to write to temporary config file"
         exit 1
     elif ! mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
@@ -222,7 +221,7 @@ migrate_config() {
 
     # Rewrite config with migrated values atomically
     local temp_config="${CONFIG_FILE}.tmp"
-    if cat >"$temp_config" <<-CONFIG 2>/dev/null
+    if cat >"$temp_config" <<-CONFIG 2>/dev/null; then
 MIN_PWM=$MIN_PWM             # Minimum active fan speed (0-255)
 MAX_PWM=$MAX_PWM            # Maximum fan speed (0-255)
 MIN_TEMP=$MIN_TEMP            # Base threshold (°C)
@@ -249,7 +248,6 @@ DRIVE_MIN_TEMP=$DRIVE_MIN_TEMP
 DRIVE_MAX_TEMP=$DRIVE_MAX_TEMP
 DRIVE_CHECK_INTERVAL=$DRIVE_CHECK_INTERVAL
 CONFIG
-    then
         if mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
             logger -t fan-control "MIGRATE: Config file updated successfully"
         else
@@ -324,7 +322,7 @@ if [ "$config_changed" = true ]; then
     temp_config="${CONFIG_FILE}.tmp"
 
     # Write corrected values to temp file
-    if ! cat >"$temp_config" <<-CONFIG 2>/dev/null
+    if ! cat >"$temp_config" <<-CONFIG 2>/dev/null; then
 MIN_PWM=$MIN_PWM             # Minimum active fan speed (0-255)
 MAX_PWM=$MAX_PWM            # Maximum fan speed (0-255)
 MIN_TEMP=$MIN_TEMP            # Base threshold (°C)
@@ -351,7 +349,6 @@ DRIVE_MIN_TEMP=$DRIVE_MIN_TEMP
 DRIVE_MAX_TEMP=$DRIVE_MAX_TEMP
 DRIVE_CHECK_INTERVAL=$DRIVE_CHECK_INTERVAL
 CONFIG
-    then
         logger -t fan-control "ERROR: Failed to write to temporary config file"
         # Continue with current in-memory values, but don't update the file
     elif ! mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
