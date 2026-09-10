@@ -61,13 +61,15 @@ jobs:
         run: |
           set -euo pipefail
           test "$(cat VERSION)" = "$VERSION"
-          bash -n fan-control.sh uninstall.sh
+          bash -n fan-control.sh uninstall.sh mqtt-lib.sh mqtt-control.sh
           archive="unifi-fan-control-v${VERSION}.tar.gz"
           tar --sort=name --owner=0 --group=0 --numeric-owner \
             --mtime="@$(git show -s --format=%ct HEAD)" \
             -czf "$archive" \
-            fan-control.sh uninstall.sh fan-control.service VERSION
-          printf '%s\n' fan-control.sh uninstall.sh fan-control.service VERSION | LC_ALL=C sort > /tmp/expected-files
+            fan-control.sh uninstall.sh fan-control.service VERSION \
+            mqtt-lib.sh mqtt-control.sh mqtt-control.service
+          printf '%s\n' fan-control.sh uninstall.sh fan-control.service VERSION \
+            mqtt-lib.sh mqtt-control.sh mqtt-control.service | LC_ALL=C sort > /tmp/expected-files
           tar -tzf "$archive" | LC_ALL=C sort > /tmp/archive-files
           diff -u /tmp/expected-files /tmp/archive-files
           sha256sum "$archive" > SHA256SUMS

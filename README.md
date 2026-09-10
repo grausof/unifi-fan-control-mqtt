@@ -113,19 +113,20 @@ cd unifi-fan-control-mqtt
 sudo ./install.sh
 ```
 
-When all four runtime files are beside `install.sh`, the installer uses those
+When all runtime files are beside `install.sh`, the installer uses those
 local files without a network request.
 
 During installation you will be asked whether to enable the optional MQTT integration
 (see [MQTT / Home Assistant Integration](#mqtt--home-assistant-integration-optional) below).
 Answering "no" (the default) installs and behaves exactly like the upstream project.
 
-> **MQTT requires Manual Installation.** The one-liner installs above only fetch the
-> four core upstream files and never include `mqtt-lib.sh`, `mqtt-control.sh` or
-> `mqtt-control.service` (they don't exist in the upstream project and have no signed
-> release channel of their own). To enable MQTT you must `git clone` this repository as
-> shown below and run `sudo ./install.sh` from the checkout, so those files are present
-> locally next to the installer.
+> **Note for this fork.** `mqtt-lib.sh`, `mqtt-control.sh` and `mqtt-control.service`
+> are fetched through the exact same verified-release / branch / local-checkout
+> pipeline as the four core files, so the one-liner installs above work for MQTT too,
+> no `git clone` required. Until this fork is merged upstream, releases and branches
+> are resolved against `github.com/grausof/unifi-fan-control-mqtt` instead of
+> `iceteaSA/unifi-fan-control`; use that repository's URLs when testing MQTT support
+> ahead of the merge.
 
 ## Configuration
 Edit `/data/fan-control/config`:

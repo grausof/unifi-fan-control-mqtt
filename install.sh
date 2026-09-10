@@ -2,15 +2,22 @@
 set -e
 set -o pipefail
 
-PAYLOAD_FILES=(fan-control.sh uninstall.sh fan-control.service VERSION)
+PAYLOAD_FILES=(fan-control.sh uninstall.sh fan-control.service VERSION mqtt-lib.sh mqtt-control.sh mqtt-control.service)
 # rc1 is 10,515 B and fan-control.sh is 38,059 B; these retain ample release headroom.
 readonly MAX_ARCHIVE_BYTES=$((2 * 1024 * 1024))
 readonly MAX_EXPANDED_ARCHIVE_BYTES=$((4 * 1024 * 1024))
 readonly MAX_PAYLOAD_FILE_BYTES=$((512 * 1024))
-REPO_OWNER="iceteaSA"
-REPO_NAME="unifi-fan-control"
+# TEMPORARY: pointed at this fork (not upstream) because mqtt-lib.sh,
+# mqtt-control.sh and mqtt-control.service only exist here - the upstream
+# project has no MQTT integration and therefore no release/branch containing
+# these files. Revert to REPO_OWNER="iceteaSA" REPO_NAME="unifi-fan-control"
+# once this is merged into the upstream repository, where its own releases
+# will carry these files instead.
+REPO_OWNER="grausof"
+REPO_NAME="unifi-fan-control-mqtt"
 INSTALL_DIR="${FAN_CONTROL_INSTALL_DIR:-/data/fan-control}"
 SERVICE_FILE="${FAN_CONTROL_SERVICE_FILE:-/etc/systemd/system/fan-control.service}"
+MQTT_SERVICE_FILE="${FAN_CONTROL_MQTT_SERVICE_FILE:-/etc/systemd/system/mqtt-control.service}"
 SYSTEMCTL="${FAN_CONTROL_SYSTEMCTL:-systemctl}"
 RELEASE_BASE_URL="${FAN_CONTROL_RELEASE_BASE_URL:-https://github.com/$REPO_OWNER/$REPO_NAME/releases}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
@@ -56,11 +63,14 @@ normalize_version() {
 
 payload_destination() {
     case "$1" in
-        fan-control.sh | uninstall.sh | VERSION)
+        fan-control.sh | uninstall.sh | VERSION | mqtt-lib.sh | mqtt-control.sh)
             printf '%s/%s\n' "$INSTALL_DIR" "$1"
             ;;
         fan-control.service)
             printf '%s\n' "$SERVICE_FILE"
+            ;;
+        mqtt-control.service)
+            printf '%s\n' "$MQTT_SERVICE_FILE"
             ;;
         *)
             fail "Unknown payload file: $1"
@@ -85,7 +95,8 @@ validate_payload() {
         fi
     done
 
-    if ! bash -n "$payload_dir/fan-control.sh" "$payload_dir/uninstall.sh"; then
+    if ! bash -n "$payload_dir/fan-control.sh" "$payload_dir/uninstall.sh" \
+        "$payload_dir/mqtt-lib.sh" "$payload_dir/mqtt-control.sh"; then
         fail "Payload scripts failed syntax validation"
     fi
 
@@ -431,7 +442,7 @@ stage_destination_files() {
     local destination
     local new_file
 
-    mkdir -p "$INSTALL_DIR" "$(dirname "$SERVICE_FILE")" || return 1
+    mkdir -p "$INSTALL_DIR" "$(dirname "$SERVICE_FILE")" "$(dirname "$MQTT_SERVICE_FILE")" || return 1
 
     for filename in "${PAYLOAD_FILES[@]}"; do
         destination=$(payload_destination "$filename")
@@ -439,8 +450,14 @@ stage_destination_files() {
         if ! cp "$WORK_DIR/payload/$filename" "$new_file"; then
             return 1
         fi
-        if [[ "$filename" == "fan-control.sh" || "$filename" == "uninstall.sh" ]]; then
+        if [[ "$filename" == "fan-control.sh" || "$filename" == "uninstall.sh" || "$filename" == "mqtt-control.sh" ]]; then
             chmod 0755 "$new_file" || return 1
+            if ! bash -n "$new_file"; then
+                return 1
+            fi
+        elif [[ "$filename" == "mqtt-lib.sh" ]]; then
+            # Sourced by fan-control.sh/mqtt-control.sh, never executed directly.
+            chmod 0644 "$new_file" || return 1
             if ! bash -n "$new_file"; then
                 return 1
             fi
@@ -554,7 +571,8 @@ install_validated_payload() {
         rollback_install
         fail "Installed VERSION readback failed"
     fi
-    if ! bash -n "$INSTALL_DIR/fan-control.sh" "$INSTALL_DIR/uninstall.sh"; then
+    if ! bash -n "$INSTALL_DIR/fan-control.sh" "$INSTALL_DIR/uninstall.sh" \
+        "$INSTALL_DIR/mqtt-lib.sh" "$INSTALL_DIR/mqtt-control.sh"; then
         rollback_install
         fail "Installed scripts failed syntax readback"
     fi
@@ -635,33 +653,6 @@ if [ -z "$enable_mqtt" ] && [ -n "$TTY" ]; then
 fi
 enable_mqtt="${enable_mqtt:-false}"
 
-# Files that are part of the optional MQTT integration (mqtt-lib.sh,
-# mqtt-control.sh, mqtt-control.service) have no equivalent in the upstream
-# project, so they are never part of the checksum-verified PAYLOAD_FILES
-# release pipeline above and have no signed/checksummed release channel of
-# their own. Rather than fetch them unverified over the network, MQTT
-# support requires running install.sh from a git checkout (or extracted
-# release tarball) of this fork with these files present alongside it -
-# fail fast, before asking anything, if that's not the case.
-if [ "$enable_mqtt" = "true" ]; then
-    for _mqtt_file in mqtt-lib.sh mqtt-control.sh mqtt-control.service; do
-        if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/$_mqtt_file" ]; then
-            fail "MQTT integration requires running install.sh from a git clone of" \
-                "https://github.com/grausof/unifi-fan-control-mqtt (missing $_mqtt_file" \
-                "next to install.sh). Clone the repository and re-run ./install.sh from" \
-                "there; the curl-pipe one-liner install does not include the MQTT files."
-        fi
-    done
-    unset _mqtt_file
-fi
-
-get_file() {
-    local filename="$1"
-    local destination="$2"
-
-    cp "$SCRIPT_DIR/$filename" "$destination" || fail "Failed to copy $filename to $destination"
-}
-
 # Update a KEY=VALUE (optionally quoted) line in the config file, preserving
 # any trailing inline comment.
 set_config_value() {
@@ -712,18 +703,10 @@ if [ "$enable_mqtt" = "true" ]; then
     set_config_value "MQTT_USER" "$mqtt_user" "quoted"
     set_config_value "MQTT_PASSWORD" "$mqtt_password" "quoted"
 
-    # Deploy the pure-Bash MQTT client library that fan-control.sh sources at
-    # runtime. This is not part of PAYLOAD_FILES (see get_file() above) and
-    # would otherwise never reach the device even with MQTT_ENABLED=true.
-    get_file "mqtt-lib.sh" "$INSTALL_DIR/mqtt-lib.sh"
-
-    # Deploy and start the MQTT command listener service
-    get_file "mqtt-control.sh" "$INSTALL_DIR/mqtt-control.sh"
-    chmod +x "$INSTALL_DIR/mqtt-control.sh"
-
-    MQTT_SERVICE_FILE="/etc/systemd/system/mqtt-control.service"
-    get_file "mqtt-control.service" "$MQTT_SERVICE_FILE"
-
+    # mqtt-lib.sh, mqtt-control.sh and mqtt-control.service were already
+    # deployed to their destinations by install_validated_payload() above
+    # (they are part of PAYLOAD_FILES, like fan-control.sh); only start the
+    # command-listener service here.
     "$SYSTEMCTL" daemon-reload || {
         echo "Error: Failed to reload systemd configuration"
         exit 1
