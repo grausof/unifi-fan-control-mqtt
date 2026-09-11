@@ -129,7 +129,10 @@ _mqtt_read_bytes_text() {
         return 0
     }
     local raw
-    raw=$(timeout "$MQTT_LIB_READ_TIMEOUT" dd bs=1 count="$count" <&${MQTT_LIB_FD} 2>/dev/null; printf 'X')
+    raw=$(
+        timeout "$MQTT_LIB_READ_TIMEOUT" dd bs=1 count="$count" <&${MQTT_LIB_FD} 2>/dev/null
+        printf 'X'
+    )
     printf '%s' "${raw%X}"
 }
 
