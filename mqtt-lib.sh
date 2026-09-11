@@ -145,9 +145,6 @@ _mqtt_read_uint16() {
 # Read the MQTT variable-length "remaining length" field, printing the
 # decoded integer. Prints nothing and returns non-zero if the socket closed
 # or the encoding is malformed.
-#
-
-
 _mqtt_read_remaining_length() {
     local multiplier=1 value=0 byte_dec iterations=0
     while true; do
