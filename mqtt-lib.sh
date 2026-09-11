@@ -19,6 +19,10 @@
 #   - No TLS - plaintext MQTT only (the standard port 1883), no "mqtts://"
 #   - No Last Will and Testament
 #   - A single connection is used at a time (fixed file descriptor 3)
+# Because MQTT_LIB_FD is a single fixed descriptor and all state is
+# global, this library is NOT reentrant/concurrency-safe. Do not source and
+# use it from two parallel invocations (background jobs, subshells racing
+# on the same fd, etc.) within the same process tree.
 ###############################################################################
 
 # Force the C locale for this library. This is required for correctness, not
@@ -41,6 +45,22 @@ export MQTT_LIB_LAST_PACKET_TYPE=""
 export MQTT_LIB_RX_TOPIC=""
 export MQTT_LIB_RX_PAYLOAD=""
 export MQTT_LIB_RX_RETAIN=0
+
+# Configurable timeout (seconds) applied to every blocking socket
+# read after the very first header byte of a packet. Previously only the
+# first byte of CONNACK had a timeout (`read -t 5`); every subsequent `dd`
+# read had none at all, so a broker that sent a partial packet and then
+# went silent would hang the script forever. Override before sourcing this
+# file if a different value is needed.
+export MQTT_LIB_READ_TIMEOUT="${MQTT_LIB_READ_TIMEOUT:-10}"
+
+# Hard ceiling (bytes) on any single PUBLISH payload this library
+# will accept. Fan-control/telemetry payloads are small JSON blobs, so this
+# is generous but still bounded - it stops a malicious/misbehaving broker
+# from declaring a huge payload and exhausting memory/CPU on embedded
+# hardware (UDM etc.). Override before sourcing if larger payloads are
+# genuinely expected.
+export MQTT_LIB_MAX_PAYLOAD_LEN="${MQTT_LIB_MAX_PAYLOAD_LEN:-65536}"
 
 # Write the raw byte for decimal value $1 (0-255) directly to the socket.
 # Bytes are streamed straight to the fd (never stored in a bash variable),
@@ -79,22 +99,38 @@ _mqtt_send_remaining_length() {
 # decimal values. Safe for embedded NUL bytes (unlike bash `read`, which
 # cannot store NUL in a variable) because the bytes are piped straight
 # through `od` as text, never captured as raw binary in a bash variable.
+#
+# The read is wrapped in `timeout` so a broker that stops
+# sending mid-packet cannot hang this call forever. On timeout/EOF this
+# prints nothing (callers already treat an empty result as failure).
 _mqtt_read_bytes_dec() {
     local count=$1
     ((count <= 0)) && return 0
-    dd bs=1 count="$count" <&${MQTT_LIB_FD} 2>/dev/null | od -An -tu1 -v | tr -s ' \n' ' '
+    timeout "$MQTT_LIB_READ_TIMEOUT" dd bs=1 count="$count" <&${MQTT_LIB_FD} 2>/dev/null | od -An -tu1 -v | tr -s ' \n' ' '
 }
 
 # Read exactly $1 raw bytes and print them as text. Only safe when the
 # caller knows the bytes contain no NUL (true for the UTF-8 topic names and
 # JSON payloads used throughout this project).
+#
+# Wrapped in `timeout` for the same reason as _mqtt_read_bytes_dec.
+# A sentinel byte ("X") is appended after the raw read and then
+# stripped off afterwards. Without this, `$(...)` command substitution
+# silently strips ALL trailing newlines from the captured bytes - so a
+# payload legitimately ending in "\n" (e.g. pretty-printed JSON) would be
+# silently corrupted with no error raised. Appending a non-newline sentinel
+# means any real trailing newlines are no longer at the end of the
+# substituted output, so bash leaves them alone; we then remove just the
+# sentinel character.
 _mqtt_read_bytes_text() {
     local count=$1
     ((count <= 0)) && {
         printf ''
         return 0
     }
-    dd bs=1 count="$count" <&${MQTT_LIB_FD} 2>/dev/null
+    local raw
+    raw=$(timeout "$MQTT_LIB_READ_TIMEOUT" dd bs=1 count="$count" <&${MQTT_LIB_FD} 2>/dev/null; printf 'X')
+    printf '%s' "${raw%X}"
 }
 
 # Read a 2-byte big-endian length field, printing the decoded integer.
@@ -107,9 +143,13 @@ _mqtt_read_uint16() {
 }
 
 # Read the MQTT variable-length "remaining length" field, printing the
-# decoded integer. Prints nothing and returns non-zero if the socket closed.
+# decoded integer. Prints nothing and returns non-zero if the socket closed
+# or the encoding is malformed.
+#
+
+
 _mqtt_read_remaining_length() {
-    local multiplier=1 value=0 byte_dec
+    local multiplier=1 value=0 byte_dec iterations=0
     while true; do
         byte_dec=$(_mqtt_read_bytes_dec 1)
         [[ -z "$byte_dec" ]] && return 1
@@ -118,6 +158,12 @@ _mqtt_read_remaining_length() {
             break
         fi
         multiplier=$((multiplier * 128))
+        # The MQTT 3.1.1 spec caps this field at 4 encoded bytes (max value 68,435,455).
+        ((iterations++))
+        if ((iterations >= 4)); then
+            MQTT_LIB_LAST_ERROR="malformed-remaining-length-too-long"
+            return 1
+        fi
     done
     printf '%d' "$value"
 }
@@ -136,6 +182,30 @@ mqtt_lib_connect() {
 
     MQTT_LIB_CONNECTED=false
     MQTT_LIB_LAST_ERROR=""
+
+    if [[ -z "$pass" && -n "${MQTT_LIB_PASS:-}" ]]; then
+        pass="$MQTT_LIB_PASS"
+    elif [[ "$pass" == @* ]]; then
+        local pass_file="${pass#@}"
+        if [[ ! -r "$pass_file" ]]; then
+            MQTT_LIB_LAST_ERROR="cannot-read-pass-file:${pass_file}"
+            return 1
+        fi
+        IFS= read -r pass <"$pass_file"
+    fi
+
+    # `keepalive` feeds directly into `$(( ))` arithmetic contexts
+    # below. Bash arithmetic expansion recursively re-expands variable
+    # content, including command substitutions - so an unvalidated value
+    # from an untrusted source (config file, env var, another process'
+    # output) could inject and execute arbitrary commands here. Reject
+    # anything that isn't a plain non-negative integer before it is ever
+    # used arithmetically, and clamp it to the protocol's 16-bit field.
+    if [[ ! "$keepalive" =~ ^[0-9]+$ ]]; then
+        MQTT_LIB_LAST_ERROR="invalid-keepalive-value: ${keepalive}"
+        return 1
+    fi
+    ((keepalive > 65535)) && keepalive=65535
 
     # Bash emits its own "Connection refused"/"Name or service not known"
     # diagnostic for a failed /dev/tcp open directly to fd 2, ignoring a
@@ -191,7 +261,7 @@ mqtt_lib_connect() {
     local -a ack_arr
     ack_remaining=$(_mqtt_read_remaining_length)
     if [[ -z "$ack_remaining" ]]; then
-        MQTT_LIB_LAST_ERROR="connack-read-failed"
+        MQTT_LIB_LAST_ERROR="${MQTT_LIB_LAST_ERROR:-connack-read-failed}"
         _mqtt_close_socket
         return 1
     fi
@@ -292,7 +362,8 @@ mqtt_lib_disconnect() {
 #                  already fully consumed from the socket
 #   TIMEOUT      - nothing arrived within the wait window (connection is
 #                  still considered alive; the caller should retry or ping)
-#   DISCONNECTED - the socket was closed by the broker/network
+#   DISCONNECTED - the socket was closed by the broker/network, or a
+#                  malformed/oversized packet forced a protective disconnect
 #
 # Returns 0 for PUBLISH/PINGRESP/OTHER/TIMEOUT, 1 for DISCONNECTED.
 mqtt_lib_read_packet() {
@@ -331,6 +402,14 @@ mqtt_lib_read_packet() {
         3) # PUBLISH
             local topic_len topic consumed qos payload_len payload
             topic_len=$(_mqtt_read_uint16)
+
+            if ((topic_len < 0)) || ((topic_len > remaining - 2)); then
+                MQTT_LIB_LAST_ERROR="malformed-publish-topic-len-${topic_len}-exceeds-remaining-${remaining}"
+                MQTT_LIB_LAST_PACKET_TYPE="DISCONNECTED"
+                _mqtt_close_socket
+                return 1
+            fi
+
             topic=$(_mqtt_read_bytes_text "$topic_len")
             consumed=$((2 + topic_len))
             qos=$(((flags >> 1) & 0x03))
@@ -339,6 +418,14 @@ mqtt_lib_read_packet() {
                 consumed=$((consumed + 2))
             fi
             payload_len=$((remaining - consumed))
+
+            if ((payload_len < 0)) || ((payload_len > MQTT_LIB_MAX_PAYLOAD_LEN)); then
+                MQTT_LIB_LAST_ERROR="publish-payload-too-large-${payload_len}"
+                MQTT_LIB_LAST_PACKET_TYPE="DISCONNECTED"
+                _mqtt_close_socket
+                return 1
+            fi
+
             payload=""
             if ((payload_len > 0)); then
                 payload=$(_mqtt_read_bytes_text "$payload_len")
@@ -354,8 +441,15 @@ mqtt_lib_read_packet() {
         *)
             # Consume and discard the body of packet types we don't act on
             # (CONNACK, SUBACK, UNSUBACK, etc.) so the stream stays in sync.
+
+            if ((remaining > MQTT_LIB_MAX_PAYLOAD_LEN)); then
+                MQTT_LIB_LAST_ERROR="unhandled-packet-too-large-${remaining}"
+                MQTT_LIB_LAST_PACKET_TYPE="DISCONNECTED"
+                _mqtt_close_socket
+                return 1
+            fi
             if ((remaining > 0)); then
-                dd bs=1 count="$remaining" <&${MQTT_LIB_FD} >/dev/null 2>&1
+                timeout "$MQTT_LIB_READ_TIMEOUT" dd bs=1 count="$remaining" <&${MQTT_LIB_FD} >/dev/null 2>&1
             fi
             MQTT_LIB_LAST_PACKET_TYPE="OTHER"
             ;;
